@@ -1,0 +1,63 @@
+# Alembic Database Migrations
+
+This directory contains database migration scripts for the Elite Creatif SaaS platform.
+
+## Quick Start
+
+### Create a new migration
+```bash
+alembic revision --autogenerate -m "description of changes"
+```
+
+### Apply migrations
+```bash
+# Upgrade to latest
+alembic upgrade head
+
+# Upgrade by one version
+alembic upgrade +1
+
+# Downgrade by one version
+alembic downgrade -1
+```
+
+### View migration history
+```bash
+alembic history
+alembic current
+```
+
+## Common Commands
+
+- `alembic revision -m "message"` - Create a new manual migration
+- `alembic revision --autogenerate -m "message"` - Auto-generate migration from model changes
+- `alembic upgrade head` - Apply all pending migrations
+- `alembic downgrade base` - Revert all migrations
+- `alembic show <revision>` - Show details of a specific migration
+- `alembic history --verbose` - Show detailed migration history
+
+## Best Practices
+
+1. Always review auto-generated migrations before applying
+2. Test migrations on development database first
+3. Back up production database before applying migrations
+4. Use descriptive migration messages
+5. Never edit applied migrations - create new ones instead
+
+## Example Workflow
+
+```bash
+# 1. Make changes to models in backend/models.py
+# 2. Generate migration
+alembic revision --autogenerate -m "add email_verified column to users"
+
+# 3. Review the generated migration file in alembic/versions/
+# 4. Test on development database
+alembic upgrade head
+
+# 5. If issues, rollback
+alembic downgrade -1
+
+# 6. Apply to production when ready
+alembic upgrade head
+```

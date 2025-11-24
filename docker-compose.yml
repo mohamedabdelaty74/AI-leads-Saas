@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  # Backend API Server
+  backend:
+    build: .
+    command: python3 backend/main.py
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./database:/app/database
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-sqlite:///./database/elite_creatif_production.db}
+      - JWT_SECRET=${JWT_SECRET}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Gradio UI with GPU support
+  gradio:
+    build: .
+    command: python3 gradio_saas_integrated.py
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./database:/app/database
+      - ./models:/app/models
+      - ./scraped_data:/app/scraped_data
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    environment:
+      - TRANSFORMERS_CACHE=/app/models
+      - HF_HOME=/app/models
+      - CUDA_VISIBLE_DEVICES=0
+      - BACKEND_URL=http://backend:8000
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  default:
+    name: elite_creatif_network

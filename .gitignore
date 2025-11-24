@@ -1,0 +1,134 @@
+# ============================================================================
+# Elite Creatif - Git Ignore
+# ============================================================================
+
+# ===== CRITICAL: Never commit these files =====
+.env
+.env.*
+!.env.example
+*.key
+config.key
+secure_config.json
+
+# ===== Database Files =====
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+database/
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ===== Virtual Environments =====
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# ===== AI Models & Cache =====
+models/
+*.pth
+*.pt
+*.bin
+*.safetensors
+.cache/
+huggingface/
+transformers_cache/
+
+# ===== Generated/Scraped Data =====
+scraped_data/
+generated_files/
+*.xlsx
+*.xls
+*.csv
+!example_template.xlsx
+exports/
+
+# ===== Logs =====
+logs/
+*.log
+*.log.*
+log/
+
+# ===== IDE & Editors =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ===== Docker =====
+docker-compose.override.yml
+.dockerignore
+
+# ===== Testing =====
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+.nox/
+
+# ===== System Files =====
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Desktop.ini
+
+# ===== Backup Files =====
+*.bak
+*.backup
+*.tmp
+*.temp
+
+# ===== SSL/TLS Certificates =====
+*.pem
+*.crt
+*.key
+*.p12
+*.pfx
+
+# Windows reserved filenames
+nul
+
+# ===== Node.js =====
+node_modules/
+.next/
+out/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*

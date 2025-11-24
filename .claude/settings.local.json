@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "WebFetch(domain:www.jeeva.ai)",
+      "WebFetch(domain:www.intercom.com)",
+      "WebFetch(domain:www.toggl.com)",
+      "Bash(dir:*)",
+      "Bash(findstr:*)",
+      "Bash(chmod:*)",
+      "Bash(nul)",
+      "Bash(if exist \"E:\\first try\\AI-leads-Saas-main\\.env\" echo .env EXISTS)",
+      "Bash(test:*)",
+      "Bash(npm install)",
+      "Bash(curl:*)",
+      "Bash(taskkill:*)",
+      "Bash(pip install:*)",
+      "Bash(TOKEN=\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI1MGI4ODIyNi1kZWYzLTQ1ODAtOWQzMi1lY2ZjMjk5MzQyN2YiLCJ0ZW5hbnRfaWQiOiJjMjczYWZiYS1hOTZlLTQ1NWQtYTY5Yi02YzY3OTE3NzM3MjkiLCJyb2xlIjoib3duZXIiLCJ0eXBlIjoiYWNjZXNzIiwiZXhwIjoxNzYyODM1NzY0fQ.81GwdlEWg9uQqZXvGRpFiVjwleUIhr0uvNVrapggO9g\")",
+      "Bash(tasklist:*)",
+      "Bash(npm run dev:*)",
+      "Bash(netstat:*)",
+      "Bash(TOKEN=\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI1MGI4ODIyNi1kZWYzLTQ1ODAtOWQzMi1lY2ZjMjk5MzQyN2YiLCJ0ZW5hbnRfaWQiOiJjMjczYWZiYS1hOTZlLTQ1NWQtYTY5Yi02YzY3OTE3NzM3MjkiLCJyb2xlIjoib3duZXIiLCJ0eXBlIjoiYWNjZXNzIiwiZXhwIjoxNzYyOTI0NTM3fQ.QfsmZ0Zh1BAs96_jUgB1AcZ0Bgyy_AyBM06AUmypFNY\")",
+      "Bash(timeout 5 echo:*)",
+      "Bash(timeout 3 echo:*)",
+      "Bash(timeout 10 echo:*)",
+      "Bash(cmd /c \"taskkill /F /PID 13224\")"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
