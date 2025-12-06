@@ -66,17 +66,38 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             )
 
         # Content Security Policy - restrict resource loading
-        csp_directives = [
-            "default-src 'self'",
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net",
-            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-            "font-src 'self' https://fonts.gstatic.com",
-            "img-src 'self' data: https:",
-            "connect-src 'self' " + " ".join(ALLOWED_ORIGINS),
-            "frame-ancestors 'none'",
-            "base-uri 'self'",
-            "form-action 'self'"
-        ]
+        # NOTE: For Next.js compatibility, we need 'unsafe-inline' for styles only in development
+        # Production should use strict CSP with nonce-based approach
+        if ENVIRONMENT == 'development':
+            # Development: More relaxed but still secure
+            csp_directives = [
+                "default-src 'self'",
+                "script-src 'self' https://cdn.jsdelivr.net",  # Removed unsafe-inline/unsafe-eval
+                "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",  # Inline styles for Next.js
+                "font-src 'self' https://fonts.gstatic.com data:",
+                "img-src 'self' data: https: blob:",
+                "connect-src 'self' " + " ".join(ALLOWED_ORIGINS) + " ws://localhost:* http://localhost:*",
+                "frame-ancestors 'none'",
+                "base-uri 'self'",
+                "form-action 'self'",
+                "object-src 'none'",  # Prevent Flash/Java/other plugins
+                "upgrade-insecure-requests"  # Auto-upgrade HTTP to HTTPS
+            ]
+        else:
+            # Production: Strict CSP - consider implementing nonce-based approach
+            csp_directives = [
+                "default-src 'self'",
+                "script-src 'self' https://cdn.jsdelivr.net",  # NO unsafe-inline/unsafe-eval
+                "style-src 'self' https://fonts.googleapis.com",  # NO unsafe-inline in production
+                "font-src 'self' https://fonts.gstatic.com data:",
+                "img-src 'self' data: https: blob:",
+                "connect-src 'self' " + " ".join(ALLOWED_ORIGINS),
+                "frame-ancestors 'none'",
+                "base-uri 'self'",
+                "form-action 'self'",
+                "object-src 'none'",
+                "upgrade-insecure-requests"
+            ]
         response.headers["Content-Security-Policy"] = "; ".join(csp_directives)
 
         # Control referrer information leakage

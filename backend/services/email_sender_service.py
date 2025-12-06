@@ -266,6 +266,135 @@ class EmailSenderService:
             "total": total
         }
 
+    def send_to_selected_leads(
+        self,
+        lead_ids: List[str],
+        sender_email: str,
+        sender_password: str,
+        db: Session,
+        min_delay: int = 5,
+        max_delay: int = 15
+    ) -> Dict[str, int]:
+        """
+        Send emails to specific selected leads
+
+        Args:
+            lead_ids: List of lead IDs to send emails to
+            sender_email: Sender Gmail address
+            sender_password: Gmail app password
+            db: Database session
+            min_delay: Minimum delay between emails (seconds)
+            max_delay: Maximum delay between emails (seconds)
+
+        Returns:
+            Dict with sent/failed/total counts
+        """
+        from models.campaign import Campaign, CampaignLead, EmailLog, EmailSendStatus
+
+        logger.info(f"Starting email send to {len(lead_ids)} selected leads")
+
+        # Get leads by IDs with generated emails
+        leads = db.query(CampaignLead).filter(
+            CampaignLead.id.in_(lead_ids),
+            CampaignLead.generated_email.isnot(None),
+            CampaignLead.email.isnot(None)
+        ).all()
+
+        if not leads:
+            logger.warning("No valid leads found with generated emails")
+            return {"sent": 0, "failed": 0, "total": 0}
+
+        total = len(leads)
+        sent_count = 0
+        failed_count = 0
+
+        logger.info(f"Found {total} leads ready for email sending")
+
+        for i, lead in enumerate(leads):
+            try:
+                # Get campaign for tenant_id
+                campaign = db.query(Campaign).filter(Campaign.id == lead.campaign_id).first()
+
+                # Parse generated email
+                email_parts = lead.generated_email.split("\n\n", 1)
+
+                if len(email_parts) >= 2:
+                    subject = email_parts[0].replace("Subject:", "").strip()
+                    body = email_parts[1].strip()
+                else:
+                    subject = f"Regarding {lead.title}"
+                    body = lead.generated_email
+
+                # Send email
+                result = self.send_single_email(
+                    to_email=lead.email,
+                    subject=subject,
+                    body=body,
+                    sender_email=sender_email,
+                    sender_password=sender_password
+                )
+
+                # Create email log
+                email_log = EmailLog(
+                    id=str(uuid.uuid4()),
+                    lead_id=lead.id,
+                    campaign_id=lead.campaign_id,
+                    tenant_id=campaign.tenant_id if campaign else None,
+                    recipient_email=lead.email,
+                    subject=subject,
+                    body=body,
+                    status=EmailSendStatus.SENT if result["success"] else EmailSendStatus.FAILED,
+                    sent_at=datetime.utcnow() if result["success"] else None,
+                    error_message=result.get("error") if not result["success"] else None,
+                    retry_count=result.get("retry_count", 0)
+                )
+                db.add(email_log)
+
+                if result["success"]:
+                    lead.email_sent = True
+                    sent_count += 1
+                    logger.info(f"[{i+1}/{total}] Sent to {lead.email}")
+                else:
+                    failed_count += 1
+                    logger.error(f"[{i+1}/{total}] Failed to send to {lead.email}: {result.get('error')}")
+
+                db.commit()
+
+                # Rate limiting
+                if i < total - 1:
+                    delay = random.uniform(min_delay, max_delay)
+                    logger.info(f"Waiting {delay:.1f} seconds before next email...")
+                    time.sleep(delay)
+
+            except Exception as e:
+                failed_count += 1
+                logger.error(f"Error processing lead {lead.id}: {e}")
+
+                try:
+                    email_log = EmailLog(
+                        id=str(uuid.uuid4()),
+                        lead_id=lead.id,
+                        campaign_id=lead.campaign_id,
+                        tenant_id=campaign.tenant_id if campaign else None,
+                        recipient_email=lead.email or "unknown",
+                        subject="",
+                        body="",
+                        status=EmailSendStatus.FAILED,
+                        error_message=str(e)
+                    )
+                    db.add(email_log)
+                    db.commit()
+                except:
+                    pass
+
+        logger.info(f"Email send complete: {sent_count} sent, {failed_count} failed out of {total} total")
+
+        return {
+            "sent": sent_count,
+            "failed": failed_count,
+            "total": total
+        }
+
     def test_connection(self, sender_email: str, sender_password: str) -> Dict[str, any]:
         """
         Test Gmail SMTP connection and authentication

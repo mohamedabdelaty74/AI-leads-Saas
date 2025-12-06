@@ -52,6 +52,12 @@ export default function CampaignsPage() {
   const [searchQuery, setSearchQuery] = useState('')
   const [filterStatus, setFilterStatus] = useState('all')
 
+  // WhatsApp state
+  const [isSendWhatsAppModalOpen, setIsSendWhatsAppModalOpen] = useState(false)
+  const [sendingWhatsApp, setSendingWhatsApp] = useState(false)
+  const [whatsappPhoneId, setWhatsappPhoneId] = useState('')
+  const [whatsappToken, setWhatsappToken] = useState('')
+
   // Edit modal state
   const [isEditEmailModalOpen, setIsEditEmailModalOpen] = useState(false)
   const [editingEmail, setEditingEmail] = useState<any | null>(null)
@@ -218,6 +224,58 @@ export default function CampaignsPage() {
       toast.error('Error saving description')
     } finally {
       setIsSaving(false)
+    }
+  }
+
+  const handleSendWhatsApp = () => {
+    // Load WhatsApp credentials from localStorage
+    const savedPhoneId = localStorage.getItem('whatsapp_phone_id') || ''
+    const savedToken = localStorage.getItem('whatsapp_token') || ''
+
+    setWhatsappPhoneId(savedPhoneId)
+    setWhatsappToken(savedToken)
+    setIsSendWhatsAppModalOpen(true)
+  }
+
+  const handleConfirmSendWhatsApp = async () => {
+    if (!selectedCampaign) return
+
+    if (!whatsappPhoneId || !whatsappToken) {
+      toast.error('Please enter WhatsApp credentials')
+      return
+    }
+
+    setSendingWhatsApp(true)
+    try {
+      const token = localStorage.getItem('token')
+      const response = await fetch(`http://localhost:8000/api/v1/campaigns/${selectedCampaign.id}/send-whatsapp`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          phone_number_id: whatsappPhoneId,
+          access_token: whatsappToken
+        })
+      })
+
+      if (response.ok) {
+        const result = await response.json()
+        toast.success(`WhatsApp messages sent! Success: ${result.sent}, Failed: ${result.failed}`)
+        setIsSendWhatsAppModalOpen(false)
+
+        // Refresh campaign data
+        handleViewCampaign(selectedCampaign)
+      } else {
+        const error = await response.json()
+        toast.error(error.detail || 'Failed to send WhatsApp messages')
+      }
+    } catch (error) {
+      console.error('Error sending WhatsApp:', error)
+      toast.error('Error sending WhatsApp messages')
+    } finally {
+      setSendingWhatsApp(false)
     }
   }
 
@@ -638,7 +696,7 @@ export default function CampaignsPage() {
       >
         {selectedCampaign && (
           <div className="space-y-6">
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-4 gap-4">
               <div className="bg-primary-50 rounded-lg p-4">
                 <p className="text-sm text-gray-600">Total Leads</p>
                 <p className="text-2xl font-bold text-gray-900">{selectedCampaignLeads.length}</p>
@@ -649,15 +707,32 @@ export default function CampaignsPage() {
                   {selectedCampaignLeads.filter(l => l.description).length}
                 </p>
               </div>
-              <div className="bg-info-50 rounded-lg p-4">
+              <div className="bg-purple-50 rounded-lg p-4">
                 <p className="text-sm text-gray-600">Emails Generated</p>
                 <p className="text-2xl font-bold text-gray-900">{selectedCampaignEmails.length}</p>
+              </div>
+              <div className="bg-green-50 rounded-lg p-4">
+                <p className="text-sm text-gray-600">WhatsApp Generated</p>
+                <p className="text-2xl font-bold text-gray-900">
+                  {selectedCampaignLeads.filter(l => l.generated_whatsapp).length}
+                </p>
               </div>
             </div>
 
             {selectedCampaignLeads.length > 0 ? (
               <div>
-                <h4 className="font-semibold text-gray-900 mb-3">Leads & Generated Content</h4>
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="font-semibold text-gray-900">Leads & Generated Content</h4>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={handleSendWhatsApp}
+                    leftIcon={<MessageSquare className="h-4 w-4" />}
+                    disabled={selectedCampaignLeads.filter(l => l.generated_whatsapp && l.phone).length === 0}
+                  >
+                    Send WhatsApp ({selectedCampaignLeads.filter(l => l.generated_whatsapp && l.phone).length})
+                  </Button>
+                </div>
                 <div className="space-y-4 max-h-96 overflow-y-auto">
                   {selectedCampaignLeads.map((lead, index) => {
                     const email = selectedCampaignEmails.find(e => e.lead_id === lead.id)
@@ -722,6 +797,30 @@ export default function CampaignsPage() {
                                 {email.sent_at && (
                                   <span className="text-xs text-gray-500">
                                     Sent: {formatDate(email.sent_at)}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {lead.generated_whatsapp && (
+                          <div>
+                            <div className="flex items-center justify-between mb-1">
+                              <p className="text-xs font-semibold text-gray-700 flex items-center gap-1">
+                                <MessageSquare className="h-3 w-3 text-green-600" />
+                                Generated WhatsApp:
+                              </p>
+                            </div>
+                            <div className="bg-green-50 p-3 rounded border border-green-200 space-y-2">
+                              <p className="text-sm text-gray-700 whitespace-pre-wrap">{lead.generated_whatsapp}</p>
+                              <div className="flex items-center gap-2 pt-2 border-t border-green-200">
+                                <Badge variant={lead.whatsapp_sent ? 'success' : 'default'} size="sm">
+                                  {lead.whatsapp_sent ? 'sent' : 'pending'}
+                                </Badge>
+                                {lead.phone && (
+                                  <span className="text-xs text-gray-500">
+                                    To: {lead.phone}
                                   </span>
                                 )}
                               </div>
@@ -844,6 +943,93 @@ export default function CampaignsPage() {
               {editDescription.length} characters
             </p>
           </div>
+        </div>
+      </Modal>
+
+      {/* Send WhatsApp Modal */}
+      <Modal
+        isOpen={isSendWhatsAppModalOpen}
+        onClose={() => setIsSendWhatsAppModalOpen(false)}
+        title="Send WhatsApp Messages"
+        description="Send WhatsApp messages to all leads with generated content"
+        size="md"
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              onClick={() => setIsSendWhatsAppModalOpen(false)}
+              disabled={sendingWhatsApp}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              onClick={handleConfirmSendWhatsApp}
+              disabled={sendingWhatsApp || !whatsappPhoneId || !whatsappToken}
+              leftIcon={sendingWhatsApp ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquare className="h-4 w-4" />}
+            >
+              {sendingWhatsApp ? 'Sending...' : 'Send Messages'}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <div className="flex gap-3">
+              <MessageSquare className="h-5 w-5 text-blue-600 flex-shrink-0 mt-0.5" />
+              <div className="text-sm text-blue-900">
+                <p className="font-semibold mb-1">Bulk WhatsApp Sending</p>
+                <p>
+                  This will send WhatsApp messages to all leads that have:
+                </p>
+                <ul className="list-disc list-inside mt-2 space-y-1">
+                  <li>Generated WhatsApp message</li>
+                  <li>Valid phone number</li>
+                  <li>Not already sent</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1.5">
+              WhatsApp Phone Number ID
+            </label>
+            <Input
+              value={whatsappPhoneId}
+              onChange={(e) => setWhatsappPhoneId(e.target.value)}
+              placeholder="Enter your WhatsApp Business Phone Number ID"
+              fullWidth
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1.5">
+              Access Token
+            </label>
+            <Input
+              type="password"
+              value={whatsappToken}
+              onChange={(e) => setWhatsappToken(e.target.value)}
+              placeholder="Enter your WhatsApp Business API access token"
+              fullWidth
+            />
+          </div>
+
+          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+            <p className="text-sm text-yellow-800">
+              <span className="font-semibold">Note:</span> Make sure you have configured your WhatsApp credentials in Settings before sending.
+            </p>
+          </div>
+
+          {selectedCampaignLeads && (
+            <div className="bg-gray-50 rounded-lg p-3">
+              <p className="text-sm text-gray-700">
+                <span className="font-semibold">Ready to send:</span>{' '}
+                {selectedCampaignLeads.filter(l => l.generated_whatsapp && l.phone && !l.whatsapp_sent).length} messages
+              </p>
+            </div>
+          )}
         </div>
       </Modal>
     </DashboardLayout>

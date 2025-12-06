@@ -19,6 +19,7 @@ import {
   BarChart3,
   Zap,
   Upload,
+  MessageCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -85,6 +86,12 @@ const navItems: NavItem[] = [
     label: 'Send Emails',
     icon: <Send className="h-5 w-5" />,
     href: '/emails/send',
+  },
+  {
+    id: 'whatsapp-send',
+    label: 'Send WhatsApp',
+    icon: <MessageCircle className="h-5 w-5" />,
+    href: '/whatsapp/send',
   },
   {
     id: 'email-analytics',

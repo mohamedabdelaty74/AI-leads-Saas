@@ -467,20 +467,47 @@ export default function AutomationPage() {
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Max Results: {maxResults}
+                  Max Results
                 </label>
                 <input
-                  type="range"
-                  min="10"
-                  max="500"
-                  step="10"
-                  className="w-full"
+                  type="number"
+                  min="1"
+                  max={source === 'google_maps' ? 500 : source === 'linkedin' ? 200 : 300}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
                   value={maxResults}
-                  onChange={(e) => setMaxResults(Number(e.target.value))}
+                  onChange={(e) => {
+                    const value = Number(e.target.value)
+                    const max = source === 'google_maps' ? 500 : source === 'linkedin' ? 200 : 300
+                    if (value > max) {
+                      setMaxResults(max)
+                      toast.error(`Maximum ${max} results allowed for ${source === 'google_maps' ? 'Google Maps' : source === 'linkedin' ? 'LinkedIn' : 'Instagram'}`)
+                    } else if (value < 1) {
+                      setMaxResults(1)
+                      toast.error('Minimum 1 result required')
+                    } else {
+                      setMaxResults(value)
+                    }
+                  }}
+                  onBlur={(e) => {
+                    const value = Number(e.target.value)
+                    if (!value || value < 1) {
+                      setMaxResults(50)
+                    }
+                  }}
                 />
-                <p className="text-xs text-gray-500 mt-1">
-                  Collect up to {maxResults} leads
-                </p>
+                <div className="mt-2 space-y-1">
+                  <p className="text-xs text-gray-500">
+                    Maximum: {source === 'google_maps' ? '500' : source === 'linkedin' ? '200' : '300'} results for {source === 'google_maps' ? 'Google Maps' : source === 'linkedin' ? 'LinkedIn' : 'Instagram'}
+                  </p>
+                  {maxResults >= 100 && (
+                    <div className="flex items-start gap-1 text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                      <AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
+                      <span>
+                        Scraping {maxResults} results may take {Math.ceil(maxResults / 10)}-{Math.ceil(maxResults / 5)} minutes
+                      </span>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </CardContent>

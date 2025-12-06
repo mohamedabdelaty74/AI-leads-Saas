@@ -55,6 +55,8 @@ export default function ImportEnrichPage() {
   const [loadingCampaigns, setLoadingCampaigns] = useState(true)
   const [processResult, setProcessResult] = useState<ProcessResult | null>(null)
   const [currentStep, setCurrentStep] = useState<'upload' | 'configure' | 'results'>('upload')
+  const [processingProgress, setProcessingProgress] = useState(0)
+  const [estimatedTime, setEstimatedTime] = useState<string>('')
 
   // Fetch campaigns on mount
   useEffect(() => {
@@ -143,16 +145,33 @@ export default function ImportEnrichPage() {
 
     setProcessing(true)
     setProcessResult(null)
+    setProcessingProgress(0)
     setProcessingStatus('Preparing upload...')
+
+    // Calculate estimated time based on rows and options
+    const estimatedMinutes = previewData
+      ? Math.ceil(previewData.totalRows * (generateDescriptions ? 0.5 : 0.1))
+      : 5
+    setEstimatedTime(`Estimated time: ${estimatedMinutes} minute${estimatedMinutes > 1 ? 's' : ''}`)
+
+    // Progress simulation
+    const progressInterval = setInterval(() => {
+      setProcessingProgress(prev => {
+        if (prev >= 90) return prev
+        return prev + Math.random() * 10
+      })
+    }, 2000)
 
     try {
       const token = localStorage.getItem('access_token')
       if (!token) {
+        clearInterval(progressInterval)
         router.push('/login')
         return
       }
 
-      setProcessingStatus('Uploading file...')
+      setProcessingStatus('Uploading CSV file...')
+      setProcessingProgress(10)
       const formData = new FormData()
       formData.append('file', uploadedFile)
 
@@ -163,7 +182,15 @@ export default function ImportEnrichPage() {
         url.searchParams.append('company_info', companyInfo.trim())
       }
 
-      setProcessingStatus('Processing leads...')
+      setProcessingStatus('Parsing CSV and validating data...')
+      setProcessingProgress(20)
+
+      // Update status based on what's enabled
+      if (generateDescriptions) {
+        setProcessingStatus('Searching Google for real-time company data...')
+        setProcessingProgress(30)
+      }
+
       const response = await fetch(url.toString(), {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
@@ -175,8 +202,22 @@ export default function ImportEnrichPage() {
         throw new Error(errorData.detail || 'Upload failed')
       }
 
-      setProcessingStatus('Finalizing import...')
+      if (generateDescriptions) {
+        setProcessingStatus('Generating AI business research reports...')
+        setProcessingProgress(50)
+      } else if (generateEmails) {
+        setProcessingStatus('Generating personalized emails...')
+        setProcessingProgress(50)
+      }
+
       const data: ProcessResult = await response.json()
+
+      setProcessingStatus('Finalizing import...')
+      setProcessingProgress(95)
+
+      clearInterval(progressInterval)
+      setProcessingProgress(100)
+
       setProcessResult(data)
       setCurrentStep('results')
 
@@ -193,6 +234,7 @@ export default function ImportEnrichPage() {
     } catch (error: any) {
       console.error('Error uploading file:', error)
       toast.error(error.message || 'Failed to process file')
+      clearInterval(progressInterval)
     } finally {
       setProcessing(false)
     }
@@ -207,6 +249,8 @@ export default function ImportEnrichPage() {
     setCompanyInfo('')
     setProcessResult(null)
     setCurrentStep('upload')
+    setProcessingProgress(0)
+    setEstimatedTime('')
   }
 
   const handleViewLeads = () => {
@@ -451,29 +495,6 @@ export default function ImportEnrichPage() {
                   </Button>
                 </div>
 
-                {/* Processing Overlay */}
-                {processing && (
-                  <div className="mt-6 p-6 bg-primary-50 border border-primary-200 rounded-lg">
-                    <div className="flex flex-col items-center justify-center space-y-4">
-                      <Loader2 className="w-12 h-12 text-primary-600 animate-spin" />
-                      <div className="text-center">
-                        <p className="text-lg font-semibold text-primary-900">{processingStatus}</p>
-                        <p className="text-sm text-primary-700 mt-1">
-                          {generateDescriptions && generateEmails
-                            ? 'Importing leads and generating AI content. This may take several minutes...'
-                            : generateDescriptions
-                            ? 'Importing leads and generating descriptions...'
-                            : generateEmails
-                            ? 'Importing leads and generating emails...'
-                            : 'Importing leads...'}
-                        </p>
-                      </div>
-                      <div className="w-full bg-primary-200 rounded-full h-2 overflow-hidden">
-                        <div className="bg-primary-600 h-2 rounded-full animate-pulse" style={{ width: '60%' }}></div>
-                      </div>
-                    </div>
-                  </div>
-                )}
               </CardContent>
             </Card>
           </div>
@@ -555,6 +576,84 @@ export default function ImportEnrichPage() {
                 View Leads in Campaign
                 <ArrowRight className="w-4 h-4 ml-2" />
               </Button>
+            </div>
+          </div>
+        )}
+
+        {/* Full-Screen Processing Overlay */}
+        {processing && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-8 animate-fadeIn">
+              <div className="flex flex-col items-center space-y-6">
+                {/* Animated Spinner */}
+                <div className="relative">
+                  <div className="w-20 h-20 border-8 border-primary-200 rounded-full"></div>
+                  <div className="w-20 h-20 border-8 border-primary-600 rounded-full absolute top-0 left-0 animate-spin border-t-transparent"></div>
+                  <Sparkles className="w-8 h-8 text-primary-600 absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 animate-pulse" />
+                </div>
+
+                {/* Status Text */}
+                <div className="text-center space-y-2">
+                  <h3 className="text-2xl font-bold text-gray-900">Processing Your Leads</h3>
+                  <p className="text-lg font-medium text-primary-600">{processingStatus}</p>
+                  <p className="text-sm text-gray-500">{estimatedTime}</p>
+                </div>
+
+                {/* Progress Bar */}
+                <div className="w-full space-y-2">
+                  <div className="flex justify-between text-sm text-gray-600">
+                    <span>Progress</span>
+                    <span>{Math.round(processingProgress)}%</span>
+                  </div>
+                  <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
+                    <div
+                      className="bg-gradient-to-r from-primary-500 to-primary-600 h-3 rounded-full transition-all duration-500 ease-out"
+                      style={{ width: `${processingProgress}%` }}
+                    ></div>
+                  </div>
+                </div>
+
+                {/* Information Cards */}
+                <div className="w-full grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
+                  {generateDescriptions && (
+                    <div className="bg-primary-50 border border-primary-200 rounded-lg p-4 text-center">
+                      <Sparkles className="w-6 h-6 text-primary-600 mx-auto mb-2" />
+                      <p className="text-xs font-semibold text-primary-900">AI Descriptions</p>
+                      <p className="text-xs text-primary-700 mt-1">Researching companies</p>
+                    </div>
+                  )}
+                  {generateEmails && (
+                    <div className="bg-purple-50 border border-purple-200 rounded-lg p-4 text-center">
+                      <Sparkles className="w-6 h-6 text-purple-600 mx-auto mb-2" />
+                      <p className="text-xs font-semibold text-purple-900">Email Generation</p>
+                      <p className="text-xs text-purple-700 mt-1">Personalizing outreach</p>
+                    </div>
+                  )}
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-center">
+                    <FileText className="w-6 h-6 text-blue-600 mx-auto mb-2" />
+                    <p className="text-xs font-semibold text-blue-900">Data Import</p>
+                    <p className="text-xs text-blue-700 mt-1">Validating & storing</p>
+                  </div>
+                </div>
+
+                {/* Helpful Tips */}
+                <div className="w-full bg-gray-50 border border-gray-200 rounded-lg p-4">
+                  <p className="text-xs text-gray-600 text-center">
+                    <strong>Did you know?</strong>{' '}
+                    {generateDescriptions
+                      ? 'Our AI searches Google in real-time to gather the latest company information before generating descriptions.'
+                      : 'You can enable AI descriptions to automatically research each company using real-time Google data.'}
+                  </p>
+                </div>
+
+                {/* Warning Message */}
+                <div className="w-full bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+                  <p className="text-xs text-yellow-800 text-center flex items-center justify-center gap-2">
+                    <AlertCircle className="w-4 h-4" />
+                    Please don't close this window. The process may take several minutes depending on the number of leads.
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
         )}

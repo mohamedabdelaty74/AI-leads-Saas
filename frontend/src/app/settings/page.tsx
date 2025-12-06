@@ -27,7 +27,8 @@ import {
   UserPlus,
   Shield,
   Check,
-  Loader2
+  Loader2,
+  MessageSquare
 } from 'lucide-react'
 
 export default function SettingsPage() {
@@ -77,6 +78,14 @@ export default function SettingsPage() {
 
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteRole, setInviteRole] = useState('member')
+
+  // WhatsApp Settings State
+  const [whatsappPhoneId, setWhatsappPhoneId] = useState('')
+  const [whatsappToken, setWhatsappToken] = useState('')
+  const [whatsappTokenVisible, setWhatsappTokenVisible] = useState(false)
+  const [verifyingWhatsapp, setVerifyingWhatsapp] = useState(false)
+  const [whatsappVerified, setWhatsappVerified] = useState(false)
+  const [savingWhatsapp, setSavingWhatsapp] = useState(false)
 
   const industryOptions = [
     { value: 'technology', label: 'Technology' },
@@ -173,6 +182,63 @@ export default function SettingsPage() {
     }
   }
 
+  const handleVerifyWhatsapp = async () => {
+    if (!whatsappPhoneId.trim() || !whatsappToken.trim()) {
+      toast.error('Please enter both Phone Number ID and Access Token')
+      return
+    }
+
+    try {
+      setVerifyingWhatsapp(true)
+      const token = localStorage.getItem('access_token')
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/v1/settings/whatsapp-credentials/verify`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          phone_number_id: whatsappPhoneId,
+          access_token: whatsappToken
+        })
+      })
+
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.detail || 'Verification failed')
+      }
+
+      const result = await response.json()
+      setWhatsappVerified(true)
+      toast.success(result.message || 'WhatsApp credentials verified successfully!')
+    } catch (error: any) {
+      toast.error(error.message || 'Failed to verify WhatsApp credentials')
+      setWhatsappVerified(false)
+    } finally {
+      setVerifyingWhatsapp(false)
+    }
+  }
+
+  const handleSaveWhatsapp = async () => {
+    if (!whatsappVerified) {
+      toast.error('Please verify credentials before saving')
+      return
+    }
+
+    try {
+      setSavingWhatsapp(true)
+      // Store credentials in localStorage for now (can be moved to backend later)
+      localStorage.setItem('whatsapp_phone_id', whatsappPhoneId)
+      localStorage.setItem('whatsapp_token', whatsappToken)
+
+      toast.success('WhatsApp credentials saved successfully!')
+    } catch (error: any) {
+      toast.error('Failed to save WhatsApp credentials')
+    } finally {
+      setSavingWhatsapp(false)
+    }
+  }
+
   return (
     <DashboardLayout>
       {/* Page Header */}
@@ -203,6 +269,12 @@ export default function SettingsPage() {
             icon={<Users className="h-4 w-4" />}
           >
             Team
+          </TabsTrigger>
+          <TabsTrigger
+            value="whatsapp"
+            icon={<MessageSquare className="h-4 w-4" />}
+          >
+            WhatsApp
           </TabsTrigger>
           <TabsTrigger
             value="billing"
@@ -588,6 +660,127 @@ export default function SettingsPage() {
                     <p className="text-sm text-gray-600">
                       Can view and generate leads, but cannot manage settings or invite others.
                     </p>
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* WhatsApp Settings Tab */}
+        <TabsContent value="whatsapp">
+          <Card>
+            <CardHeader>
+              <CardTitle>WhatsApp Business API</CardTitle>
+              <CardDescription>
+                Configure WhatsApp Business API credentials to send messages to your leads
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-6">
+                {/* Instructions */}
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                  <div className="flex gap-3">
+                    <MessageSquare className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <h4 className="font-semibold text-blue-900 mb-1">How to get WhatsApp Business API credentials</h4>
+                      <ol className="text-sm text-blue-800 space-y-1 list-decimal list-inside">
+                        <li>Create a Meta Developer account at <a href="https://developers.facebook.com" target="_blank" rel="noopener noreferrer" className="underline">developers.facebook.com</a></li>
+                        <li>Create a new app and add WhatsApp Business product</li>
+                        <li>Get your Phone Number ID from the WhatsApp dashboard</li>
+                        <li>Generate an access token with messaging permissions</li>
+                      </ol>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Phone Number ID */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Phone Number ID *
+                  </label>
+                  <Input
+                    type="text"
+                    value={whatsappPhoneId}
+                    onChange={(e) => {
+                      setWhatsappPhoneId(e.target.value)
+                      setWhatsappVerified(false)
+                    }}
+                    placeholder="123456789012345"
+                    icon={<Phone className="h-4 w-4" />}
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Find this in your WhatsApp Business API dashboard
+                  </p>
+                </div>
+
+                {/* Access Token */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Access Token *
+                  </label>
+                  <div className="relative">
+                    <Input
+                      type={whatsappTokenVisible ? 'text' : 'password'}
+                      value={whatsappToken}
+                      onChange={(e) => {
+                        setWhatsappToken(e.target.value)
+                        setWhatsappVerified(false)
+                      }}
+                      placeholder="EAAxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                      icon={<Key className="h-4 w-4" />}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setWhatsappTokenVisible(!whatsappTokenVisible)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                    >
+                      {whatsappTokenVisible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </button>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Generate a permanent access token from your Meta app settings
+                  </p>
+                </div>
+
+                {/* Verification Status */}
+                {whatsappVerified && (
+                  <div className="bg-green-50 border border-green-200 rounded-lg p-4 flex items-center gap-3">
+                    <Check className="w-5 h-5 text-green-600" />
+                    <div>
+                      <p className="font-medium text-green-900">Credentials Verified</p>
+                      <p className="text-sm text-green-700">Your WhatsApp Business API credentials are valid</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Actions */}
+                <div className="flex gap-3 pt-4 border-t border-gray-200">
+                  <Button
+                    onClick={handleVerifyWhatsapp}
+                    disabled={verifyingWhatsapp || !whatsappPhoneId || !whatsappToken}
+                    variant="outline"
+                    leftIcon={verifyingWhatsapp ? <Loader2 className="h-4 w-4 animate-spin" /> : <Shield className="h-4 w-4" />}
+                  >
+                    {verifyingWhatsapp ? 'Verifying...' : 'Verify Credentials'}
+                  </Button>
+                  <Button
+                    onClick={handleSaveWhatsapp}
+                    disabled={!whatsappVerified || savingWhatsapp}
+                    leftIcon={savingWhatsapp ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                  >
+                    {savingWhatsapp ? 'Saving...' : 'Save Credentials'}
+                  </Button>
+                </div>
+
+                {/* Usage Info */}
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mt-6">
+                  <h4 className="font-semibold text-gray-900 mb-2">Usage Information</h4>
+                  <div className="text-sm text-gray-600 space-y-1">
+                    <p>• These credentials will be used to send WhatsApp messages to your leads</p>
+                    <p>• Messages are sent via the WhatsApp Cloud API</p>
+                    <p>• Standard WhatsApp Business API rates apply</p>
+                    <p>• Ensure your WhatsApp Business account is approved for messaging</p>
                   </div>
                 </div>
               </div>

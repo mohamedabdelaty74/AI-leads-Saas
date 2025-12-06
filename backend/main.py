@@ -35,10 +35,12 @@ except ImportError:
 except Exception as e:
     print(f"[WARNING] Could not load .env file: {e}")
 
-from fastapi import FastAPI, Depends, HTTPException, status, Body, UploadFile, BackgroundTasks
+from fastapi import FastAPI, Depends, HTTPException, status, Body, UploadFile, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
+import asyncio
+import json as json_lib
 
 import jwt
 import torch
@@ -56,10 +58,40 @@ from models.user import User, UserRole
 from models.campaign import Campaign, CampaignLead, EmailTemplate, EmailLog, EmailSendStatus
 from models.base import init_db
 from env_validator import run_all_validations
+from cache_manager import cache, cached  # Redis caching system
 import uuid
 import logging
 
 logger = logging.getLogger(__name__)
+
+# ============================================================================
+# Lead Generation Cancellation Tracker
+# ============================================================================
+
+# Global dictionary to track active lead generation tasks
+# Format: {campaign_id: {"cancelled": bool, "source": str}}
+active_lead_generation_tasks = {}
+
+def is_generation_cancelled(campaign_id: str) -> bool:
+    """Check if lead generation for a campaign has been cancelled"""
+    return active_lead_generation_tasks.get(campaign_id, {}).get("cancelled", False)
+
+def mark_generation_cancelled(campaign_id: str):
+    """Mark lead generation for a campaign as cancelled"""
+    if campaign_id in active_lead_generation_tasks:
+        active_lead_generation_tasks[campaign_id]["cancelled"] = True
+        logger.info(f"Lead generation cancelled for campaign {campaign_id}")
+
+def register_generation_task(campaign_id: str, source: str):
+    """Register a new lead generation task"""
+    active_lead_generation_tasks[campaign_id] = {"cancelled": False, "source": source}
+    logger.info(f"Lead generation started for campaign {campaign_id} from {source}")
+
+def unregister_generation_task(campaign_id: str):
+    """Remove a lead generation task from tracking"""
+    if campaign_id in active_lead_generation_tasks:
+        del active_lead_generation_tasks[campaign_id]
+        logger.info(f"Lead generation task removed for campaign {campaign_id}")
 
 # ============================================================================
 # Environment Validation
@@ -207,7 +239,7 @@ def get_notifications(
     from datetime import datetime, timedelta
 
     notifications = []
-    now = datetime.utcnow()
+    now = datetime.now()  # Use local time instead of UTC
 
     # Get recent campaigns with leads
     recent_campaigns = db.query(Campaign).filter(
@@ -221,16 +253,31 @@ def get_notifications(
         ).count()
 
         if lead_count > 0:
-            # Calculate time ago
-            time_diff = now - campaign.created_at
-            if time_diff < timedelta(hours=1):
-                time_ago = f"{int(time_diff.total_seconds() / 60)} minutes ago"
-            elif time_diff < timedelta(days=1):
-                time_ago = f"{int(time_diff.total_seconds() / 3600)} hours ago"
-            elif time_diff < timedelta(days=7):
-                time_ago = f"{int(time_diff.days)} days ago"
+            # Calculate time ago - handle timezone-naive timestamps
+            campaign_time = campaign.created_at
+            if campaign_time.tzinfo is None and now.tzinfo is None:
+                time_diff = now - campaign_time
             else:
-                time_ago = f"{int(time_diff.days / 7)} weeks ago"
+                # If there's timezone info, make them comparable
+                time_diff = now.replace(tzinfo=None) - campaign_time.replace(tzinfo=None)
+
+            # Format time ago with better handling
+            total_seconds = time_diff.total_seconds()
+            if total_seconds < 0:
+                time_ago = "just now"
+            elif total_seconds < 60:
+                time_ago = "just now"
+            elif total_seconds < 3600:  # Less than 1 hour
+                minutes = int(total_seconds / 60)
+                time_ago = f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+            elif total_seconds < 86400:  # Less than 1 day
+                hours = int(total_seconds / 3600)
+                time_ago = f"{hours} hour{'s' if hours != 1 else ''} ago"
+            elif time_diff.days < 7:
+                time_ago = f"{time_diff.days} day{'s' if time_diff.days != 1 else ''} ago"
+            else:
+                weeks = int(time_diff.days / 7)
+                time_ago = f"{weeks} week{'s' if weeks != 1 else ''} ago"
 
             notifications.append({
                 "id": f"campaign-{campaign.id}",
@@ -278,6 +325,64 @@ def get_notifications(
         "notifications": notifications,
         "unread_count": sum(1 for n in notifications if not n.get("read", False))
     }
+
+
+# ============================================================================
+# WebSocket for Real-Time Notifications
+# ============================================================================
+
+# Connection manager for WebSocket clients
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: dict[str, list[WebSocket]] = {}
+
+    async def connect(self, websocket: WebSocket, tenant_id: str):
+        await websocket.accept()
+        if tenant_id not in self.active_connections:
+            self.active_connections[tenant_id] = []
+        self.active_connections[tenant_id].append(websocket)
+        logger.info(f"WebSocket connected for tenant {tenant_id}")
+
+    def disconnect(self, websocket: WebSocket, tenant_id: str):
+        if tenant_id in self.active_connections:
+            self.active_connections[tenant_id].remove(websocket)
+            if not self.active_connections[tenant_id]:
+                del self.active_connections[tenant_id]
+        logger.info(f"WebSocket disconnected for tenant {tenant_id}")
+
+    async def send_personal_message(self, message: str, websocket: WebSocket):
+        await websocket.send_text(message)
+
+    async def broadcast_to_tenant(self, message: dict, tenant_id: str):
+        if tenant_id in self.active_connections:
+            for connection in self.active_connections[tenant_id]:
+                try:
+                    await connection.send_json(message)
+                except Exception as e:
+                    logger.error(f"Error broadcasting to tenant {tenant_id}: {e}")
+
+manager = ConnectionManager()
+
+@app.websocket("/ws/notifications/{tenant_id}")
+async def websocket_notifications(websocket: WebSocket, tenant_id: str):
+    """
+    WebSocket endpoint for real-time notifications
+
+    Replaces polling with push notifications for better performance
+    Frontend connects once and receives updates as they happen
+    """
+    await manager.connect(websocket, tenant_id)
+    try:
+        while True:
+            # Keep connection alive and listen for pings
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, tenant_id)
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        manager.disconnect(websocket, tenant_id)
 
 
 # ============================================================================
@@ -603,6 +708,11 @@ def create_campaign(
     db.add(campaign)
     db.commit()
     db.refresh(campaign)
+
+    # Invalidate campaigns cache for this tenant
+    cache.delete(f"campaigns:{tenant.id}")
+    logger.debug(f"🗑️ Cache invalidated: campaigns for tenant {tenant.id}")
+
     return campaign
 
 
@@ -623,12 +733,48 @@ def list_campaigns(
     - filter(Campaign.tenant_id == tenant.id) ensures isolation
     - Users ONLY see their own company's campaigns
     - No way to access other tenants' data
+
+    ⚡ PERFORMANCE: Redis Caching
+    - Results cached for 5 minutes per tenant
+    - Cache invalidated on create/update/delete
     """
+    # Try cache first
+    cache_key = f"campaigns:{tenant.id}"
+    cached_campaigns = cache.get(cache_key)
+
+    if cached_campaigns is not None:
+        logger.debug(f"🎯 Cache HIT: campaigns for tenant {tenant.id}")
+        return cached_campaigns
+
+    # Cache miss - query database
+    logger.debug(f"💾 Cache MISS: campaigns for tenant {tenant.id}")
     campaigns = db.query(Campaign).filter(
         Campaign.tenant_id == tenant.id
     ).order_by(Campaign.created_at.desc()).all()
 
-    return campaigns
+    # Serialize to dict with ALL required fields for CampaignResponse schema
+    campaigns_data = [
+        {
+            "id": c.id,
+            "tenant_id": c.tenant_id,
+            "name": c.name,
+            "description": c.description,
+            "status": c.status.value if c.status else "draft",  # Serialize enum
+            "search_query": c.search_query or "",
+            "lead_source": c.lead_source.value if c.lead_source else "manual",  # Serialize enum
+            "max_leads": c.max_leads or 100,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+            "started_at": c.started_at.isoformat() if c.started_at else None,
+            "completed_at": c.completed_at.isoformat() if c.completed_at else None
+        }
+        for c in campaigns
+    ]
+
+    # Store in cache for 5 minutes
+    cache.set(cache_key, campaigns_data, ttl=300)
+    logger.debug(f"📦 Cached {len(campaigns_data)} campaigns for tenant {tenant.id}")
+
+    return campaigns_data
 
 
 @app.get(
@@ -687,6 +833,11 @@ def update_campaign(
 
     db.commit()
     db.refresh(campaign)
+
+    # Invalidate campaigns cache for this tenant
+    cache.delete(f"campaigns:{tenant.id}")
+    logger.debug(f"🗑️ Cache invalidated: campaigns for tenant {tenant.id}")
+
     return campaign
 
 
@@ -715,7 +866,58 @@ def delete_campaign(
 
     db.delete(campaign)
     db.commit()
+
+    # Invalidate campaigns cache for this tenant
+    cache.delete(f"campaigns:{tenant.id}")
+    logger.debug(f"🗑️ Cache invalidated: campaigns for tenant {tenant.id}")
+
     return None
+
+
+@app.post(
+    "/api/v1/campaigns/{campaign_id}/cancel-generation",
+    status_code=status.HTTP_200_OK,
+    summary="Cancel lead generation",
+    tags=["Campaigns"]
+)
+def cancel_lead_generation(
+    campaign_id: str,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: Session = Depends(get_db)
+):
+    """Cancel ongoing lead generation for a campaign"""
+    # Verify campaign belongs to tenant
+    campaign = db.query(Campaign).filter(
+        Campaign.id == campaign_id,
+        Campaign.tenant_id == tenant.id
+    ).first()
+
+    if not campaign:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Campaign not found"
+        )
+
+    # Check if there's an active generation task
+    if campaign_id not in active_lead_generation_tasks:
+        return {
+            "message": "No active lead generation found for this campaign",
+            "campaign_id": campaign_id,
+            "cancelled": False
+        }
+
+    # Mark generation as cancelled
+    mark_generation_cancelled(campaign_id)
+
+    task_info = active_lead_generation_tasks.get(campaign_id, {})
+    source = task_info.get("source", "unknown")
+
+    return {
+        "message": f"Lead generation from {source} cancelled",
+        "campaign_id": campaign_id,
+        "source": source,
+        "cancelled": True
+    }
 
 
 # ============================================================================
@@ -1097,22 +1299,29 @@ async def upload_leads_file(
                     # Refresh to get DB state
                     db.refresh(lead)
 
-                    # Generate business research using AI service (skip if already exists in CSV)
-                    if generate_descriptions and not lead.description:
+                    # Generate business research using AI service (always if checkbox enabled)
+                    if generate_descriptions:
                         try:
-                            description = ai_service.generate_business_research(
+                            # Save original CSV bio before generating AI description
+                            original_bio = lead.description if lead.description else ""
+
+                            # Generate AI business research
+                            ai_description = ai_service.generate_business_research(
                                 company_name=lead.title,
                                 company_data=f"Address: {lead.address or 'N/A'}, Phone: {lead.phone or 'N/A'}, Website: {lead.website or 'N/A'}"
                             )
-                            lead.description = description
+
+                            # Concatenate CSV bio + AI description for richer context
+                            if original_bio:
+                                lead.description = f"{original_bio}\n\n{ai_description}"
+                            else:
+                                lead.description = ai_description
+
                             lead.lead_score = 75  # Higher score for AI-researched leads
                             enrichment_stats['descriptions_generated'] += 1
                             print(f"[SUCCESS] Generated research for {lead.title}")
                         except Exception as e:
                             print(f"[ERROR] Failed to generate research for {lead.title}: {e}")
-                    elif generate_descriptions and lead.description:
-                        enrichment_stats['descriptions_from_csv'] += 1
-                        print(f"[SKIP] Description already exists for {lead.title} (from CSV)")
 
                     # Generate personalized email using AI service (skip if already exists in CSV)
                     if generate_emails and company_info and not lead.generated_email:
@@ -1340,6 +1549,9 @@ def generate_leads_google_maps(
             detail="Campaign not found"
         )
 
+    # Register this lead generation task
+    register_generation_task(campaign_id, "google_maps")
+
     try:
         # Search Google Maps for places
         places = search_places(
@@ -1351,7 +1563,21 @@ def generate_leads_google_maps(
         # Convert to leads and save to database
         import uuid
         leads = []
-        for place in places:
+        for i, place in enumerate(places):
+            # Check if generation was cancelled
+            if is_generation_cancelled(campaign_id):
+                logger.info(f"Google Maps lead generation cancelled for campaign {campaign_id} after {len(leads)} leads")
+                db.commit()  # Save leads generated so far
+                unregister_generation_task(campaign_id)
+                return {
+                    "message": f"Lead generation cancelled. Generated {len(leads)} of {len(places)} leads",
+                    "campaign_id": campaign_id,
+                    "leads_generated": len(leads),
+                    "query": query,
+                    "location": location,
+                    "cancelled": True
+                }
+
             lead = CampaignLead(
                 id=str(uuid.uuid4()),
                 campaign_id=campaign_id,
@@ -1369,19 +1595,27 @@ def generate_leads_google_maps(
 
         db.commit()
 
+        # Unregister task on successful completion
+        unregister_generation_task(campaign_id)
+
         return {
             "message": f"Successfully generated {len(leads)} leads from Google Maps",
             "campaign_id": campaign_id,
             "leads_generated": len(leads),
             "query": query,
-            "location": location
+            "location": location,
+            "cancelled": False
         }
 
     except GoogleMapsScraperError as e:
+        unregister_generation_task(campaign_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate leads: {str(e)}"
         )
+    except Exception as e:
+        unregister_generation_task(campaign_id)
+        raise
 
 
 @app.post(
@@ -1416,6 +1650,9 @@ def generate_leads_instagram(
             detail="Campaign not found"
         )
 
+    # Register this lead generation task
+    register_generation_task(campaign_id, "instagram")
+
     try:
         # Search Instagram for profiles
         profiles = search_instagram_profiles(
@@ -1426,7 +1663,20 @@ def generate_leads_instagram(
         # Convert to leads and save to database
         import uuid
         leads = []
-        for profile in profiles:
+        for i, profile in enumerate(profiles):
+            # Check if generation was cancelled
+            if is_generation_cancelled(campaign_id):
+                logger.info(f"Instagram lead generation cancelled for campaign {campaign_id} after {len(leads)} leads")
+                db.commit()  # Save leads generated so far
+                unregister_generation_task(campaign_id)
+                return {
+                    "message": f"Lead generation cancelled. Generated {len(leads)} of {len(profiles)} leads",
+                    "campaign_id": campaign_id,
+                    "leads_generated": len(leads),
+                    "query": query,
+                    "cancelled": True
+                }
+
             # Calculate lead score based on contact availability
             has_email = bool(profile.get('email'))
             has_phone = bool(profile.get('phone'))
@@ -1476,19 +1726,25 @@ def generate_leads_instagram(
 
         db.commit()
 
+        # Unregister task on successful completion
+        unregister_generation_task(campaign_id)
+
         return {
             "message": f"Successfully generated {len(leads)} leads from Instagram",
             "campaign_id": campaign_id,
             "leads_generated": len(leads),
-            "query": query
+            "query": query,
+            "cancelled": False
         }
 
     except InstagramScraperError as e:
+        unregister_generation_task(campaign_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate Instagram leads: {str(e)}"
         )
     except Exception as e:
+        unregister_generation_task(campaign_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate Instagram leads: {str(e)}"
@@ -1527,6 +1783,9 @@ def generate_leads_linkedin(
             detail="Campaign not found"
         )
 
+    # Register this lead generation task
+    register_generation_task(campaign_id, "linkedin")
+
     try:
         # Search LinkedIn for profiles
         profiles = search_linkedin_profiles(
@@ -1537,7 +1796,20 @@ def generate_leads_linkedin(
         # Convert to leads and save to database
         import uuid
         leads = []
-        for profile in profiles:
+        for i, profile in enumerate(profiles):
+            # Check if generation was cancelled
+            if is_generation_cancelled(campaign_id):
+                logger.info(f"LinkedIn lead generation cancelled for campaign {campaign_id} after {len(leads)} leads")
+                db.commit()  # Save leads generated so far
+                unregister_generation_task(campaign_id)
+                return {
+                    "message": f"Lead generation cancelled. Generated {len(leads)} of {len(profiles)} leads",
+                    "campaign_id": campaign_id,
+                    "leads_generated": len(leads),
+                    "query": query,
+                    "cancelled": True
+                }
+
             # Calculate lead score based on contact availability and seniority
             has_email = bool(profile.get('email'))
             has_phone = bool(profile.get('phone'))
@@ -1591,19 +1863,25 @@ def generate_leads_linkedin(
 
         db.commit()
 
+        # Unregister task on successful completion
+        unregister_generation_task(campaign_id)
+
         return {
             "message": f"Successfully generated {len(leads)} leads from LinkedIn",
             "campaign_id": campaign_id,
             "leads_generated": len(leads),
-            "query": query
+            "query": query,
+            "cancelled": False
         }
 
     except LinkedInScraperError as e:
+        unregister_generation_task(campaign_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate LinkedIn leads: {str(e)}"
         )
     except Exception as e:
+        unregister_generation_task(campaign_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate LinkedIn leads: {str(e)}"
@@ -1870,6 +2148,247 @@ def enrich_single_lead(
         "whatsapp_found": bool(result.get('whatsapp')),
         "social_links_found": list(result.get('social', {}).keys())
     }
+
+
+# ============================================================================
+# Bulk Automation Routes
+# ============================================================================
+
+@app.post(
+    "/api/v1/campaigns/{campaign_id}/bulk-generate-descriptions",
+    status_code=status.HTTP_200_OK,
+    summary="Bulk generate AI descriptions for selected leads",
+    tags=["Leads"]
+)
+def bulk_generate_descriptions(
+    campaign_id: str,
+    lead_ids: list[str],
+    tenant: Tenant = Depends(get_current_tenant),
+    db: Session = Depends(get_db)
+):
+    """
+    Generate AI business descriptions for multiple leads in a campaign
+    """
+    # Verify campaign belongs to tenant
+    campaign = db.query(Campaign).filter(
+        Campaign.id == campaign_id,
+        Campaign.tenant_id == tenant.id
+    ).first()
+
+    if not campaign:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Campaign not found"
+        )
+
+    generated = 0
+    failed = 0
+    errors = []
+
+    for lead_id in lead_ids:
+        try:
+            # Get the lead
+            lead = db.query(CampaignLead).filter(
+                CampaignLead.id == lead_id,
+                CampaignLead.campaign_id == campaign_id
+            ).first()
+
+            if not lead:
+                failed += 1
+                errors.append(f"Lead {lead_id}: not found")
+                continue
+
+            # Generate description using AI
+            prompt = f"Generate a professional 2-3 sentence business description for: {lead.title}"
+            if lead.description:
+                prompt += f". Additional context: {lead.description[:200]}"
+
+            try:
+                ai_description = ai_service.generate_text(prompt, max_length=200)
+                lead.generated_description = ai_description
+                generated += 1
+            except Exception as e:
+                logger.error(f"AI generation failed for lead {lead_id}: {e}")
+                failed += 1
+                errors.append(f"Lead {lead.title}: AI generation failed")
+
+        except Exception as e:
+            failed += 1
+            errors.append(f"Lead {lead_id}: {str(e)}")
+
+    db.commit()
+
+    return {
+        "message": f"Generated {generated} descriptions successfully",
+        "generated": generated,
+        "failed": failed,
+        "total": len(lead_ids),
+        "errors": errors[:10] if errors else []
+    }
+
+
+@app.post(
+    "/api/v1/campaigns/{campaign_id}/bulk-generate-emails",
+    status_code=status.HTTP_200_OK,
+    summary="Bulk generate AI emails for selected leads",
+    tags=["Leads"]
+)
+def bulk_generate_emails(
+    campaign_id: str,
+    request_data: dict,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: Session = Depends(get_db)
+):
+    """
+    Generate AI cold emails for multiple leads in a campaign
+    """
+    lead_ids = request_data.get('lead_ids', [])
+    company_info = request_data.get('company_info', '')
+
+    # Verify campaign belongs to tenant
+    campaign = db.query(Campaign).filter(
+        Campaign.id == campaign_id,
+        Campaign.tenant_id == tenant.id
+    ).first()
+
+    if not campaign:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Campaign not found"
+        )
+
+    if not company_info:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Company information is required for email generation"
+        )
+
+    generated = 0
+    failed = 0
+    errors = []
+
+    for lead_id in lead_ids:
+        try:
+            # Get the lead
+            lead = db.query(CampaignLead).filter(
+                CampaignLead.id == lead_id,
+                CampaignLead.campaign_id == campaign_id
+            ).first()
+
+            if not lead:
+                failed += 1
+                errors.append(f"Lead {lead_id}: not found")
+                continue
+
+            # Build context for email
+            lead_description = lead.generated_description or lead.description or f"business: {lead.title}"
+
+            # Generate email using AI
+            prompt = f"""Write a professional cold outreach email to {lead.title}.
+
+Lead Info: {lead_description}
+Your Company: {company_info}
+
+Email should be:
+- Personalized and professional
+- 3-4 short paragraphs
+- Clear value proposition
+- Soft call-to-action
+- No subject line needed"""
+
+            try:
+                ai_email = ai_service.generate_text(prompt, max_length=500)
+                lead.generated_email = ai_email
+                generated += 1
+            except Exception as e:
+                logger.error(f"AI email generation failed for lead {lead_id}: {e}")
+                failed += 1
+                errors.append(f"Lead {lead.title}: AI generation failed")
+
+        except Exception as e:
+            failed += 1
+            errors.append(f"Lead {lead_id}: {str(e)}")
+
+    db.commit()
+
+    return {
+        "message": f"Generated {generated} emails successfully",
+        "generated": generated,
+        "failed": failed,
+        "total": len(lead_ids),
+        "errors": errors[:10] if errors else []
+    }
+
+
+@app.post(
+    "/api/v1/campaigns/{campaign_id}/send-emails-to-leads",
+    status_code=status.HTTP_200_OK,
+    summary="Send emails to selected leads",
+    tags=["Email Sending"]
+)
+def send_emails_to_selected_leads(
+    campaign_id: str,
+    send_data: dict,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: Session = Depends(get_db)
+):
+    """
+    Send generated emails to specific selected leads
+    """
+    lead_ids = send_data.get('lead_ids', [])
+    sender_email = send_data.get('sender_email')
+    sender_password = send_data.get('sender_password')
+    min_delay = send_data.get('min_delay', 5)
+    max_delay = send_data.get('max_delay', 15)
+
+    # Verify campaign belongs to tenant
+    campaign = db.query(Campaign).filter(
+        Campaign.id == campaign_id,
+        Campaign.tenant_id == tenant.id
+    ).first()
+
+    if not campaign:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Campaign not found"
+        )
+
+    # Test Gmail connection first
+    connection_test = email_sender_service.test_connection(
+        sender_email,
+        sender_password
+    )
+
+    if not connection_test["success"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=connection_test["error"]
+        )
+
+    # Send emails to selected leads
+    try:
+        result = email_sender_service.send_to_selected_leads(
+            lead_ids=lead_ids,
+            sender_email=sender_email,
+            sender_password=sender_password,
+            db=db,
+            min_delay=min_delay,
+            max_delay=max_delay
+        )
+
+        return {
+            "message": f"Sent {result['sent']} emails successfully",
+            "sent": result["sent"],
+            "failed": result["failed"],
+            "total": result["total"]
+        }
+
+    except Exception as e:
+        logger.error(f"Error sending emails: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to send emails: {str(e)}"
+        )
 
 
 # ============================================================================
@@ -2649,10 +3168,21 @@ def generate_description_background_task(lead_id: str, tenant_id: str):
     Runs asynchronously without blocking the API
     """
     from backend.services.ai_service import ai_service
+    from backend.services.task_manager import task_manager
     from models.base import SessionLocal
+
+    # Register task with task manager
+    task_id = f"description_{lead_id}"
+    task = task_manager.create_task(task_id, "description", {"lead_id": lead_id, "tenant_id": tenant_id})
+    task.start()
 
     db = SessionLocal()
     try:
+        # Check if cancelled before starting
+        if task.is_cancelled():
+            logger.info(f"[Background] Task {task_id} was cancelled before starting")
+            return
+
         lead = db.query(CampaignLead).join(Campaign).filter(
             CampaignLead.id == lead_id,
             Campaign.tenant_id == tenant_id
@@ -2660,18 +3190,35 @@ def generate_description_background_task(lead_id: str, tenant_id: str):
 
         if lead:
             logger.info(f"[Background] Generating AI description for lead: {lead.title}")
+
+            # Generate with cancellation support
             description = ai_service.generate_business_research(
                 company_name=lead.title,
-                company_data=f"Address: {lead.address or 'N/A'}, Phone: {lead.phone or 'N/A'}, Website: {lead.website or 'N/A'}"
+                company_data=f"Address: {lead.address or 'N/A'}, Phone: {lead.phone or 'N/A'}, Website: {lead.website or 'N/A'}",
+                task_id=task_id  # Pass task_id for cancellation checking
             )
+
+            # Check if cancelled after generation
+            if task.is_cancelled():
+                logger.info(f"[Background] Task {task_id} was cancelled, discarding results")
+                return
+
             lead.description = description
             lead.lead_score = 75
             db.commit()
+
+            task.complete({"description": description})
             logger.info(f"[Background] ✅ AI description generated for: {lead.title}")
         else:
             logger.warning(f"[Background] Lead {lead_id} not found")
+            task.fail("Lead not found")
+
     except Exception as e:
-        logger.error(f"[Background] Failed to generate description for lead {lead_id}: {e}")
+        if task.is_cancelled():
+            logger.info(f"[Background] Task {task_id} was cancelled")
+        else:
+            logger.error(f"[Background] Failed to generate description for lead {lead_id}: {e}")
+            task.fail(str(e))
     finally:
         db.close()
 
@@ -2715,6 +3262,10 @@ def generate_email_background_task(lead_id: str, tenant_id: str, company_info: s
 
             # Build comprehensive description using ALL available data
             description = lead.description or f"{lead.title} - Business at {lead.address or 'N/A'}"
+
+            # Add deep research if available (concatenate for enhanced personalization)
+            if lead.deep_research:
+                description += f"\n\n**Deep Business Intelligence:**\n{lead.deep_research}"
 
             # Add ALL additional context from scraped_data for hyper-personalization
             additional_context = ""
@@ -2809,6 +3360,119 @@ Use ALL the context provided above to create a highly personalized email that de
         db.close()
 
 
+def generate_whatsapp_background_task(lead_id: str, tenant_id: str, company_info: str):
+    """
+    Background task to generate AI WhatsApp message for a lead
+    Runs asynchronously without blocking the API
+    """
+    from backend.services.ai_service import ai_service
+    from backend.services.whatsapp_service import get_whatsapp_service
+    from models.base import SessionLocal
+
+    # Get WhatsApp service
+    whatsapp_service = get_whatsapp_service(ai_service=ai_service)
+
+    db = SessionLocal()
+    try:
+        lead = db.query(CampaignLead).join(Campaign).filter(
+            CampaignLead.id == lead_id,
+            Campaign.tenant_id == tenant_id
+        ).first()
+
+        if lead:
+            logger.info(f"[Background] Generating AI WhatsApp message for lead: {lead.title}")
+
+            # Build description from available data
+            description = lead.description or f"{lead.title} - Business at {lead.address or 'N/A'}"
+
+            # Add deep research if available (concatenate for enhanced personalization)
+            if lead.deep_research:
+                description += f" | Deep Intelligence: {lead.deep_research[:300]}"  # First 300 chars for WhatsApp
+
+            # Add additional context from scraped_data
+            if lead.scraped_data:
+                context_items = []
+                for key, value in lead.scraped_data.items():
+                    if value and str(value).strip() and key not in ['category', 'rating']:
+                        formatted_key = key.replace('_', ' ').title()
+                        context_items.append(f"{formatted_key}: {value}")
+
+                if context_items:
+                    description += " | " + ", ".join(context_items[:3])  # Limit to 3 items for WhatsApp
+
+            # Extract first name if available
+            first_name = lead.title.split()[0] if lead.title and ' ' in lead.title else None
+
+            # Generate WhatsApp message using AI
+            whatsapp_message = whatsapp_service.generate_whatsapp_message(
+                lead_name=lead.title,
+                lead_description=description,
+                company_info=company_info,
+                first_name=first_name,
+                custom_instruction=None
+            )
+
+            lead.generated_whatsapp = whatsapp_message
+            db.commit()
+            logger.info(f"[Background] ✅ AI WhatsApp message generated for: {lead.title}")
+        else:
+            logger.warning(f"[Background] Lead {lead_id} not found")
+    except Exception as e:
+        logger.error(f"[Background] Failed to generate WhatsApp for lead {lead_id}: {e}")
+    finally:
+        db.close()
+
+
+def generate_deep_research_background_task(lead_id: str, tenant_id: str):
+    """
+    Background task to generate deep business research for a lead
+    Uses Google Search + AI for comprehensive analysis
+    """
+    from backend.services.ai_service import ai_service
+    from models.base import SessionLocal
+
+    db = SessionLocal()
+    try:
+        lead = db.query(CampaignLead).join(Campaign).filter(
+            CampaignLead.id == lead_id,
+            Campaign.tenant_id == tenant_id
+        ).first()
+
+        if lead:
+            logger.info(f"[Background] Generating deep research for lead: {lead.title}")
+
+            # Build company data from available sources
+            company_data = ""
+            if lead.description:
+                company_data += f"Business Description: {lead.description}\n"
+            if lead.website:
+                company_data += f"Website: {lead.website}\n"
+            if lead.address:
+                company_data += f"Location: {lead.address}\n"
+            if lead.scraped_data:
+                for key, value in lead.scraped_data.items():
+                    if value and str(value).strip():
+                        formatted_key = key.replace('_', ' ').title()
+                        company_data += f"{formatted_key}: {value}\n"
+
+            # Generate deep research using AI with Google Search
+            deep_research = ai_service.generate_business_research(
+                company_name=lead.title,
+                company_data=company_data,
+                max_search_results=8
+            )
+
+            lead.deep_research = deep_research
+            db.commit()
+            logger.info(f"[Background] ✅ Deep research generated for: {lead.title}")
+        else:
+            logger.warning(f"[Background] Lead {lead_id} not found")
+    except Exception as e:
+        logger.error(f"[Background] Failed to generate deep research for lead {lead_id}: {e}")
+    finally:
+        db.close()
+
+
 @app.post(
     "/api/v1/leads/{lead_id}/generate-description",
     summary="Generate AI description for a lead (async)",
@@ -2889,6 +3553,419 @@ async def generate_lead_email(
     return {
         "status": "processing",
         "message": f"AI email generation queued for {lead.title}. This will take 15-25 minutes on CPU.",
+        "lead_id": lead_id
+    }
+
+
+@app.post(
+    "/api/v1/leads/{lead_id}/cancel-generation",
+    summary="Cancel AI generation for a lead",
+    tags=["Leads"]
+)
+async def cancel_lead_generation(
+    lead_id: str,
+    tenant: Tenant = Depends(get_current_tenant)
+):
+    """
+    Cancel ongoing AI generation (description or email) for a lead
+    """
+    from backend.services.task_manager import task_manager
+
+    # Try to cancel both description and email tasks for this lead
+    cancelled_tasks = []
+
+    # Check for description task
+    desc_task_id = f"description_{lead_id}"
+    if task_manager.cancel_task(desc_task_id):
+        cancelled_tasks.append("description")
+
+    # Check for email task
+    email_task_id = f"email_{lead_id}"
+    if task_manager.cancel_task(email_task_id):
+        cancelled_tasks.append("email")
+
+    if cancelled_tasks:
+        return {
+            "status": "cancelled",
+            "message": f"Cancelled {', '.join(cancelled_tasks)} generation for lead",
+            "cancelled_tasks": cancelled_tasks
+        }
+    else:
+        return {
+            "status": "no_active_tasks",
+            "message": "No active generation tasks found for this lead"
+        }
+
+
+# ============================================================================
+# 📱 WhatsApp Generation & Sending
+# ============================================================================
+
+@app.post(
+    "/api/v1/leads/{lead_id}/generate-whatsapp",
+    summary="Generate AI WhatsApp message for a lead (async)",
+    tags=["WhatsApp"]
+)
+async def generate_lead_whatsapp(
+    lead_id: str,
+    background_tasks: BackgroundTasks,
+    company_info: str = Body(..., embed=True),
+    tenant: Tenant = Depends(get_current_tenant),
+    db: Session = Depends(get_db)
+):
+    """
+    Queue AI WhatsApp message generation in the background
+
+    Returns immediately with status "processing"
+    The AI generation happens asynchronously without blocking
+    """
+    lead = db.query(CampaignLead).join(Campaign).filter(
+        CampaignLead.id == lead_id,
+        Campaign.tenant_id == tenant.id
+    ).first()
+
+    if not lead:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lead not found")
+
+    # Queue the background task
+    background_tasks.add_task(
+        generate_whatsapp_background_task,
+        lead_id=lead_id,
+        tenant_id=tenant.id,
+        company_info=company_info
+    )
+
+    logger.info(f"Queued AI WhatsApp generation for lead: {lead.title}")
+
+    return {
+        "status": "processing",
+        "message": f"AI WhatsApp generation queued for {lead.title}. This will take 15-25 minutes on CPU.",
+        "lead_id": lead_id
+    }
+
+
+@app.post(
+    "/api/v1/campaigns/{campaign_id}/send-whatsapp",
+    summary="Send WhatsApp messages to campaign leads",
+    tags=["WhatsApp"]
+)
+async def send_campaign_whatsapp(
+    campaign_id: str,
+    phone_number_id: str = Body(...),
+    access_token: str = Body(...),
+    lead_ids: list[str] = Body(default=None),
+    tenant: Tenant = Depends(get_current_tenant),
+    db: Session = Depends(get_db)
+):
+    """
+    Send WhatsApp messages to leads in a campaign
+
+    Args:
+        campaign_id: Campaign ID
+        phone_number_id: WhatsApp Business Phone Number ID
+        access_token: WhatsApp Business API access token
+        lead_ids: Optional list of specific lead IDs (if None, sends to all leads with messages)
+    """
+    from backend.services.whatsapp_service import get_whatsapp_service
+    from backend.services.ai_service import ai_service
+
+    # Get WhatsApp service
+    whatsapp_service = get_whatsapp_service(ai_service=ai_service)
+
+    # Verify credentials first
+    is_valid, message = whatsapp_service.verify_credentials(phone_number_id, access_token)
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid WhatsApp credentials: {message}"
+        )
+
+    # Get campaign
+    campaign = db.query(Campaign).filter(
+        Campaign.id == campaign_id,
+        Campaign.tenant_id == tenant.id
+    ).first()
+
+    if not campaign:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found")
+
+    # Get leads to send to
+    query = db.query(CampaignLead).filter(
+        CampaignLead.campaign_id == campaign_id,
+        CampaignLead.generated_whatsapp.isnot(None),  # Must have generated message
+        CampaignLead.phone.isnot(None)  # Must have phone number
+    )
+
+    if lead_ids:
+        query = query.filter(CampaignLead.id.in_(lead_ids))
+
+    leads = query.all()
+
+    if not leads:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No leads found with WhatsApp messages and phone numbers"
+        )
+
+    # Send WhatsApp messages
+    success_count = 0
+    failed_count = 0
+    errors = []
+
+    for lead in leads:
+        try:
+            success, error_msg = whatsapp_service.send_whatsapp_message(
+                phone=lead.phone,
+                message=lead.generated_whatsapp,
+                phone_number_id=phone_number_id,
+                access_token=access_token
+            )
+
+            if success:
+                lead.whatsapp_sent = True
+                success_count += 1
+            else:
+                failed_count += 1
+                errors.append({"lead": lead.title, "error": error_msg})
+
+            # Rate limiting - small delay between messages
+            time.sleep(0.2)
+
+        except Exception as e:
+            failed_count += 1
+            errors.append({"lead": lead.title, "error": str(e)})
+            logger.error(f"Failed to send WhatsApp to {lead.title}: {e}")
+
+    db.commit()
+
+    return {
+        "status": "completed",
+        "total": len(leads),
+        "sent": success_count,
+        "failed": failed_count,
+        "errors": errors[:10]  # Return first 10 errors
+    }
+
+
+@app.post(
+    "/api/v1/test-whatsapp-connection",
+    summary="Test WhatsApp Business API connection",
+    tags=["WhatsApp"]
+)
+async def test_whatsapp_connection(
+    phone_number_id: str = Body(...),
+    access_token: str = Body(...),
+    tenant: Tenant = Depends(get_current_tenant)
+):
+    """
+    Test WhatsApp Business API credentials
+
+    Returns success if credentials are valid
+    """
+    from backend.services.whatsapp_service import get_whatsapp_service
+    from backend.services.ai_service import ai_service
+
+    whatsapp_service = get_whatsapp_service(ai_service=ai_service)
+
+    is_valid, message = whatsapp_service.verify_credentials(phone_number_id, access_token)
+
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid WhatsApp credentials: {message}"
+        )
+
+    return {
+        "status": "success",
+        "message": message
+    }
+
+
+@app.post(
+    "/api/v1/campaigns/{campaign_id}/send-whatsapp-all",
+    summary="Send WhatsApp messages to all leads in campaign",
+    tags=["WhatsApp"]
+)
+async def send_whatsapp_to_all_leads(
+    campaign_id: str,
+    phone_number_id: str = Body(...),
+    access_token: str = Body(...),
+    min_delay: int = Body(default=5),
+    max_delay: int = Body(default=15),
+    tenant: Tenant = Depends(get_current_tenant),
+    db: Session = Depends(get_db)
+):
+    """
+    Send WhatsApp messages to ALL leads in a campaign that have:
+    - Generated WhatsApp messages
+    - Phone numbers
+    - Haven't been sent yet (optional filter)
+
+    Args:
+        campaign_id: Campaign ID
+        phone_number_id: WhatsApp Business Phone Number ID
+        access_token: WhatsApp Business API access token
+        min_delay: Minimum delay between messages in seconds
+        max_delay: Maximum delay between messages in seconds
+    """
+    import random
+    from backend.services.whatsapp_service import get_whatsapp_service
+    from backend.services.ai_service import ai_service
+
+    # Get WhatsApp service
+    whatsapp_service = get_whatsapp_service(ai_service=ai_service)
+
+    # Verify credentials first
+    is_valid, message = whatsapp_service.verify_credentials(phone_number_id, access_token)
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid WhatsApp credentials: {message}"
+        )
+
+    # Get campaign
+    campaign = db.query(Campaign).filter(
+        Campaign.id == campaign_id,
+        Campaign.tenant_id == tenant.id
+    ).first()
+
+    if not campaign:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found")
+
+    # Get ALL leads in campaign with WhatsApp messages and phone numbers
+    leads = db.query(CampaignLead).filter(
+        CampaignLead.campaign_id == campaign_id,
+        CampaignLead.generated_whatsapp.isnot(None),  # Must have generated message
+        CampaignLead.phone.isnot(None)  # Must have phone number
+    ).all()
+
+    if not leads:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No leads found with WhatsApp messages and phone numbers"
+        )
+
+    # Send WhatsApp messages with random delays
+    success_count = 0
+    failed_count = 0
+    errors = []
+
+    for i, lead in enumerate(leads):
+        try:
+            success, error_msg = whatsapp_service.send_whatsapp_message(
+                phone=lead.phone,
+                message=lead.generated_whatsapp,
+                phone_number_id=phone_number_id,
+                access_token=access_token
+            )
+
+            if success:
+                lead.whatsapp_sent = True
+                success_count += 1
+                logger.info(f"WhatsApp sent to {lead.title} ({i+1}/{len(leads)})")
+            else:
+                failed_count += 1
+                errors.append({"lead": lead.title, "error": error_msg})
+                logger.error(f"Failed to send WhatsApp to {lead.title}: {error_msg}")
+
+            # Random delay between messages (except for last one)
+            if i < len(leads) - 1:
+                delay = random.uniform(min_delay, max_delay)
+                logger.info(f"Waiting {delay:.1f} seconds before next message...")
+                time.sleep(delay)
+
+        except Exception as e:
+            failed_count += 1
+            errors.append({"lead": lead.title, "error": str(e)})
+            logger.error(f"Exception sending WhatsApp to {lead.title}: {e}")
+
+    db.commit()
+
+    return {
+        "message": f"Sent {success_count} WhatsApp messages successfully",
+        "total": len(leads),
+        "sent": success_count,
+        "failed": failed_count,
+        "errors": errors[:10]  # Return first 10 errors
+    }
+
+
+@app.post(
+    "/api/v1/settings/whatsapp-credentials/verify",
+    summary="Verify WhatsApp Business API credentials",
+    tags=["Settings", "WhatsApp"]
+)
+async def verify_whatsapp_credentials(
+    phone_number_id: str = Body(...),
+    access_token: str = Body(...),
+    tenant: Tenant = Depends(get_current_tenant)
+):
+    """
+    Verify WhatsApp Business API credentials
+
+    Returns success if credentials are valid
+    """
+    from backend.services.whatsapp_service import get_whatsapp_service
+    from backend.services.ai_service import ai_service
+
+    whatsapp_service = get_whatsapp_service(ai_service=ai_service)
+    is_valid, message = whatsapp_service.verify_credentials(phone_number_id, access_token)
+
+    if is_valid:
+        return {"status": "verified", "message": message}
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=message
+        )
+
+
+@app.post(
+    "/api/v1/leads/{lead_id}/generate-deep-research",
+    summary="Generate deep business research for a lead (async)",
+    tags=["Leads", "AI Research"]
+)
+async def generate_lead_deep_research(
+    lead_id: str,
+    background_tasks: BackgroundTasks,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: Session = Depends(get_db)
+):
+    """
+    Queue deep business research generation in the background
+
+    Uses Google Search + AI to generate comprehensive business intelligence:
+    - Business overview
+    - Industry position
+    - Key strengths
+    - Growth indicators
+    - Challenges/pain points
+    - Decision makers
+    - Best approach for outreach
+
+    Returns immediately with status "processing"
+    The research generation happens asynchronously (15-30 minutes on CPU)
+    """
+    lead = db.query(CampaignLead).join(Campaign).filter(
+        CampaignLead.id == lead_id,
+        Campaign.tenant_id == tenant.id
+    ).first()
+
+    if not lead:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lead not found")
+
+    # Queue the background task
+    background_tasks.add_task(
+        generate_deep_research_background_task,
+        lead_id=lead_id,
+        tenant_id=tenant.id
+    )
+
+    logger.info(f"Queued deep research generation for lead: {lead.title}")
+
+    return {
+        "status": "processing",
+        "message": f"Deep research generation queued for {lead.title}. This will take 15-30 minutes on CPU.",
         "lead_id": lead_id
     }
 
@@ -3238,23 +4315,58 @@ async def run_automation_pipeline(
 
 if __name__ == "__main__":
     import uvicorn
+    import multiprocessing
+
+    # Determine if running in production or development
+    ENV = os.getenv("ENV", "development")  # Set ENV=production for production
+    IS_PRODUCTION = ENV == "production"
 
     print("=" * 60)
     print("Elite Creatif API Server")
     print("=" * 60)
+    print(f"Environment: {ENV}")
     print()
     print("Starting server...")
     print("  - API: http://localhost:8000")
     print("  - Docs: http://localhost:8000/docs")
     print("  - ReDoc: http://localhost:8000/redoc")
     print()
-    print("=" * 60)
 
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,  # Auto-reload on code changes
-        log_level="info"
-    )
+    if IS_PRODUCTION:
+        # Production settings: Multiple workers for better concurrency
+        cpu_count = multiprocessing.cpu_count()
+        workers = (2 * cpu_count) + 1  # Recommended: (2 * cores) + 1
+        print(f"Production Mode:")
+        print(f"  - Workers: {workers} (CPU cores: {cpu_count})")
+        print(f"  - Auto-reload: Disabled")
+        print()
+        print("=" * 60)
+
+        uvicorn.run(
+            "main:app",
+            host="0.0.0.0",
+            port=8000,
+            workers=workers,
+            log_level="info",
+            access_log=True,
+            limit_concurrency=1000,      # Max concurrent requests
+            limit_max_requests=10000,    # Restart worker after N requests (memory leak protection)
+            timeout_keep_alive=75        # Keep-alive timeout
+        )
+    else:
+        # Development settings: Single worker with auto-reload
+        print(f"Development Mode:")
+        print(f"  - Workers: 1")
+        print(f"  - Auto-reload: Enabled")
+        print()
+        print("=" * 60)
+
+        uvicorn.run(
+            "main:app",
+            host="0.0.0.0",
+            port=8000,
+            reload=True,              # Auto-reload on code changes
+            log_level="info",
+            reload_dirs=["backend", "models"]  # Watch these directories
+        )
 

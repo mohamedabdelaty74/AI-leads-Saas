@@ -10,6 +10,7 @@ from typing import Optional, List, Dict
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from huggingface_hub import login
 from dotenv import load_dotenv
+from serpapi import GoogleSearch
 
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -332,22 +333,91 @@ Subject: [generated subject]
     def generate_business_research(
         self,
         company_name: str,
-        company_data: str = ""
+        company_data: str = "",
+        max_search_results: int = 8,
+        task_id: Optional[str] = None
     ) -> str:
         """
-        Generate detailed business research and intelligence for a company
+        Generate detailed business research using REAL-TIME Google search + AI
 
         Args:
             company_name: Name of the company
             company_data: Additional data about the company (optional)
+            max_search_results: Number of Google results to fetch (default: 8)
 
         Returns:
-            Structured business intelligence report
+            Structured business intelligence report based on real data
         """
         if not self.is_loaded:
             raise Exception("AI model not loaded. Call load_model() first.")
 
-        # Create the research prompt
+        # Check for cancellation at the start
+        if task_id:
+            from backend.services.task_manager import check_cancellation
+            if check_cancellation(task_id):
+                raise Exception("Task was cancelled")
+
+        # STEP 1: Search Google for real-time company information
+        serpapi_key = os.getenv("SERPAPI_KEY")
+        google_data = ""
+
+        if serpapi_key:
+            try:
+                logger.info(f"Searching Google for: {company_name}")
+
+                # Search Google using SerpAPI
+                params = {
+                    "engine": "google",
+                    "q": f'"{company_name}" company profile',
+                    "api_key": serpapi_key,
+                    "num": max_search_results
+                }
+                search = GoogleSearch(params)
+                results = search.get_dict()
+                organic_results = results.get("organic_results", [])
+
+                # Filter relevant results (same logic as gen/generate_description.py)
+                filtered_results = []
+                company_keywords = company_name.lower().split()
+
+                for item in organic_results:
+                    title = item.get('title', '').lower()
+                    snippet = item.get('snippet', '').lower()
+
+                    # Check relevance
+                    is_relevant = any(keyword in title or keyword in snippet
+                                     for keyword in company_keywords)
+
+                    if is_relevant:
+                        filtered_results.append(f"{item.get('title','')} {item.get('snippet','')}")
+
+                # Combine Google results
+                google_data = " ".join(filtered_results) if filtered_results else " ".join(
+                    [f"{item.get('title','')} {item.get('snippet','')}" for item in organic_results]
+                )
+
+                logger.info(f"Found {len(organic_results)} Google results for {company_name}")
+
+            except Exception as e:
+                logger.warning(f"Google search failed for {company_name}: {e}")
+                logger.info("Falling back to AI's built-in knowledge")
+
+        # STEP 2: Combine Google data + company_data for AI
+        combined_context = f"""
+Real-time Google Search Results:
+{google_data if google_data else "No Google data available"}
+
+Additional Context from Lead Data:
+{company_data if company_data else "No additional data"}
+"""
+
+        # Check for cancellation before expensive AI generation
+        if task_id:
+            from backend.services.task_manager import check_cancellation
+            if check_cancellation(task_id):
+                raise Exception("Task was cancelled")
+
+        # STEP 3: Generate AI research report
         messages = [
             {
                 "role": "system",
@@ -371,7 +441,8 @@ Subject: [generated subject]
 
 **Best Approach:** [One sentence on how to effectively approach them for B2B services]
 
-Additional context: {company_data if company_data else "No additional data provided - use general business knowledge"}
+Data sources:
+{combined_context}
 
 Keep each section concise but actionable. Total response under 250 words. Focus on insights useful for B2B sales outreach."""
             }
@@ -417,7 +488,7 @@ Keep each section concise but actionable. Total response under 250 words. Focus 
                 start_idx = research_report.find("**Business:**")
                 research_report = research_report[start_idx:].strip()
 
-            logger.info(f"Generated business research for {company_name}")
+            logger.info(f"✅ Generated real-time business research for {company_name}")
             return research_report
 
         except Exception as e:

@@ -33,14 +33,17 @@ import {
   Globe,
   X,
   Clock,
-  CheckCircle2
+  CheckCircle2,
+  Mail,
+  MessageCircle,
+  Send
 } from 'lucide-react'
 
 // Type for pending tasks
 interface PendingTask {
   leadId: string
   leadName: string
-  type: 'description' | 'email'
+  type: 'description' | 'deep_research' | 'email' | 'whatsapp'
   startTime: number
 }
 
@@ -82,10 +85,17 @@ export default function LeadsPage() {
 
   // Generate AI State
   const [generatingDescriptionId, setGeneratingDescriptionId] = useState<string | null>(null)
+  const [generatingDeepResearchId, setGeneratingDeepResearchId] = useState<string | null>(null)
   const [generatingEmailId, setGeneratingEmailId] = useState<string | null>(null)
   const [showEmailModal, setShowEmailModal] = useState(false)
   const [emailCompanyInfo, setEmailCompanyInfo] = useState('')
   const [currentLeadForEmail, setCurrentLeadForEmail] = useState<any>(null)
+
+  // WhatsApp Generation State
+  const [generatingWhatsappId, setGeneratingWhatsappId] = useState<string | null>(null)
+  const [showWhatsappModal, setShowWhatsappModal] = useState(false)
+  const [whatsappCompanyInfo, setWhatsappCompanyInfo] = useState('')
+  const [currentLeadForWhatsapp, setCurrentLeadForWhatsapp] = useState<any>(null)
 
   // Enrich Leads State
   const [enrichingLeads, setEnrichingLeads] = useState(false)
@@ -105,7 +115,34 @@ export default function LeadsPage() {
 
   // AbortController refs for cancellation (only for active UI operations)
   const descriptionAbortRef = useRef<AbortController | null>(null)
+  const deepResearchAbortRef = useRef<AbortController | null>(null)
   const emailAbortRef = useRef<AbortController | null>(null)
+
+  // Bulk Automation State
+  const [selectedLeads, setSelectedLeads] = useState<string[]>([])
+  const [selectAll, setSelectAll] = useState(false)
+  const [bulkGeneratingDescriptions, setBulkGeneratingDescriptions] = useState(false)
+  const [bulkGeneratingEmails, setBulkGeneratingEmails] = useState(false)
+  const [bulkGeneratingWhatsApp, setBulkGeneratingWhatsApp] = useState(false)
+  const [sendingEmails, setSendingEmails] = useState(false)
+  const [sendingWhatsApp, setSendingWhatsApp] = useState(false)
+
+  // AbortControllers for cancelling operations
+  const abortControllerDescriptions = useRef<AbortController | null>(null)
+  const abortControllerEmails = useRef<AbortController | null>(null)
+  const abortControllerWhatsApp = useRef<AbortController | null>(null)
+
+  // Send Email Dialog State
+  const [showSendEmailDialog, setShowSendEmailDialog] = useState(false)
+  const [senderEmail, setSenderEmail] = useState('')
+  const [senderPassword, setSenderPassword] = useState('')
+  const [bulkEmailCompanyInfo, setBulkEmailCompanyInfo] = useState('')
+
+  // Send WhatsApp Dialog State
+  const [showSendWhatsAppDialog, setShowSendWhatsAppDialog] = useState(false)
+  const [whatsappPhoneNumberId, setWhatsappPhoneNumberId] = useState('')
+  const [whatsappAccessToken, setWhatsappAccessToken] = useState('')
+  const [bulkWhatsAppCompanyInfo, setBulkWhatsAppCompanyInfo] = useState('')
 
   // Load pending tasks from localStorage on mount
   useEffect(() => {
@@ -211,17 +248,77 @@ export default function LeadsPage() {
   }
 
   // Cancel generation handler
-  const handleCancelGeneration = (leadId: string, type: 'description' | 'email') => {
-    if (type === 'description' && descriptionAbortRef.current) {
-      descriptionAbortRef.current.abort()
-      setGeneratingDescriptionId(null)
-    } else if (type === 'email' && emailAbortRef.current) {
-      emailAbortRef.current.abort()
-      setGeneratingEmailId(null)
-      setShowEmailModal(false)
+  const handleCancelGeneration = async (leadId: string, type: 'description' | 'email') => {
+    console.log('🛑 CANCEL CLICKED - Lead ID:', leadId, 'Type:', type)
+
+    try {
+      const token = localStorage.getItem('access_token')
+      if (!token) {
+        toast.error('You must be logged in')
+        return
+      }
+
+      console.log('🌐 Sending cancel request to backend...')
+
+      // Call backend cancel endpoint
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/v1/leads/${leadId}/cancel-generation`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      )
+
+      console.log('📡 Cancel response status:', response.status)
+
+      if (!response.ok) {
+        throw new Error('Failed to cancel generation')
+      }
+
+      const data = await response.json()
+
+      // Also abort the HTTP request on frontend side
+      if (type === 'description' && descriptionAbortRef.current) {
+        descriptionAbortRef.current.abort()
+        setGeneratingDescriptionId(null)
+      } else if (type === 'deep_research' && deepResearchAbortRef.current) {
+        deepResearchAbortRef.current.abort()
+        setGeneratingDeepResearchId(null)
+      } else if (type === 'email' && emailAbortRef.current) {
+        emailAbortRef.current.abort()
+        setGeneratingEmailId(null)
+        setShowEmailModal(false)
+      }
+
+      removePendingTask(leadId)
+
+      if (data.status === 'cancelled') {
+        toast.success(`Cancelled ${data.cancelled_tasks.join(', ')} generation`)
+      } else {
+        toast.info('No active generation tasks found')
+      }
+
+    } catch (error) {
+      console.error('Error cancelling generation:', error)
+      toast.error('Failed to cancel generation')
+
+      // Fallback: still abort the frontend request
+      if (type === 'description' && descriptionAbortRef.current) {
+        descriptionAbortRef.current.abort()
+        setGeneratingDescriptionId(null)
+      } else if (type === 'deep_research' && deepResearchAbortRef.current) {
+        deepResearchAbortRef.current.abort()
+        setGeneratingDeepResearchId(null)
+      } else if (type === 'email' && emailAbortRef.current) {
+        emailAbortRef.current.abort()
+        setGeneratingEmailId(null)
+        setShowEmailModal(false)
+      }
+      removePendingTask(leadId)
     }
-    removePendingTask(leadId)
-    toast.info('Generation cancelled')
   }
 
   // Set first campaign as default when campaigns load
@@ -408,6 +505,54 @@ export default function LeadsPage() {
     } finally {
       setGeneratingInstagramLeads(false)
       setGenerationStatus('')
+    }
+  }
+
+  const handleCancelLeadGeneration = async () => {
+    if (!selectedCampaignId) {
+      return
+    }
+
+    try {
+      const token = localStorage.getItem('access_token')
+      if (!token) {
+        toast.error('You must be logged in')
+        return
+      }
+
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/v1/campaigns/${selectedCampaignId}/cancel-generation`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      )
+
+      if (!response.ok) {
+        throw new Error('Failed to cancel lead generation')
+      }
+
+      const data = await response.json()
+
+      // Reset all generation states
+      setGeneratingGoogleLeads(false)
+      setGeneratingLinkedinLeads(false)
+      setGeneratingInstagramLeads(false)
+      setGenerationStatus('')
+
+      if (data.cancelled) {
+        toast.success(`Lead generation cancelled from ${data.source}`)
+        // Refresh leads to show any partially generated leads
+        await fetchLeads(selectedCampaignId)
+      } else {
+        toast.info(data.message)
+      }
+    } catch (error) {
+      console.error('Error cancelling lead generation:', error)
+      toast.error(error instanceof Error ? error.message : 'Failed to cancel lead generation')
     }
   }
 
@@ -812,6 +957,53 @@ export default function LeadsPage() {
     }
   }
 
+  const handleGenerateDeepResearch = async (leadId: string) => {
+    // Find lead name for better UX
+    const lead = leads.find(l => l.id === leadId)
+    const leadName = lead?.title || 'Lead'
+
+    try {
+      setGeneratingDeepResearchId(leadId)
+
+      // Create AbortController for cancellation
+      deepResearchAbortRef.current = new AbortController()
+
+      const token = localStorage.getItem('access_token')
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/v1/leads/${leadId}/generate-deep-research`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        signal: deepResearchAbortRef.current.signal
+      })
+
+      if (!response.ok) throw new Error('Failed to queue deep research generation')
+
+      const result = await response.json()
+
+      // Add to pending tasks for tracking
+      addPendingTask(leadId, leadName, 'deep_research')
+
+      // Show success message that task is queued
+      toast.success(
+        `Deep research queued for ${leadName}! This will take 15-30 minutes. Auto-refresh is enabled - you'll be notified when it's ready.`,
+        { duration: 7000 }
+      )
+
+    } catch (error: any) {
+      if (error.name === 'AbortError') {
+        // Request was cancelled - don't show error
+        return
+      }
+      console.error('Generate deep research error:', error)
+      toast.error(error.message || 'Failed to queue deep research generation')
+    } finally {
+      setGeneratingDeepResearchId(null)
+      deepResearchAbortRef.current = null
+    }
+  }
+
   const handleGenerateEmailClick = (lead: any) => {
     setCurrentLeadForEmail(lead)
     setShowEmailModal(true)
@@ -876,18 +1068,430 @@ export default function LeadsPage() {
     }
   }
 
+  const handleGenerateWhatsappClick = (lead: any) => {
+    setCurrentLeadForWhatsapp(lead)
+    setShowWhatsappModal(true)
+  }
+
+  const handleGenerateWhatsapp = async () => {
+    if (!currentLeadForWhatsapp) return
+
+    if (!whatsappCompanyInfo.trim()) {
+      toast.error('Please enter your company information')
+      return
+    }
+
+    const leadId = currentLeadForWhatsapp.id
+    const leadName = currentLeadForWhatsapp.title
+
+    try {
+      setGeneratingWhatsappId(leadId)
+
+      const token = localStorage.getItem('access_token')
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/v1/leads/${leadId}/generate-whatsapp`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ company_info: whatsappCompanyInfo })
+      })
+
+      if (!response.ok) throw new Error('Failed to queue WhatsApp generation')
+
+      const result = await response.json()
+
+      // Add to pending tasks for tracking
+      addPendingTask(leadId, leadName, 'whatsapp')
+
+      // Show success message that task is queued
+      toast.success(
+        `AI WhatsApp message queued for ${leadName}! Auto-refresh is enabled - you'll be notified when it's ready.`,
+        { duration: 5000 }
+      )
+
+      // Close modal and reset
+      setShowWhatsappModal(false)
+      setWhatsappCompanyInfo('')
+      setCurrentLeadForWhatsapp(null)
+
+    } catch (error: any) {
+      console.error('Generate WhatsApp error:', error)
+      toast.error(error.message || 'Failed to queue WhatsApp generation')
+    } finally {
+      setGeneratingWhatsappId(null)
+    }
+  }
+
+  // ============================================================================
+  // Bulk Automation Handlers
+  // ============================================================================
+
+  const handleSelectLead = (leadId: string) => {
+    setSelectedLeads(prev =>
+      prev.includes(leadId)
+        ? prev.filter(id => id !== leadId)
+        : [...prev, leadId]
+    )
+  }
+
+  const handleSelectAll = () => {
+    if (selectAll) {
+      setSelectedLeads([])
+    } else {
+      setSelectedLeads(leads.map((lead: any) => lead.id))
+    }
+    setSelectAll(!selectAll)
+  }
+
+  const handleBulkGenerateDescriptions = async () => {
+    if (selectedLeads.length === 0) {
+      toast.error('Please select leads first')
+      return
+    }
+
+    setBulkGeneratingDescriptions(true)
+
+    try {
+      const token = localStorage.getItem('access_token')
+      if (!token) {
+        toast.error('You must be logged in')
+        return
+      }
+
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/v1/campaigns/${selectedCampaignId}/bulk-generate-descriptions`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(selectedLeads)
+        }
+      )
+
+      if (!response.ok) {
+        throw new Error('Failed to generate descriptions')
+      }
+
+      const data = await response.json()
+      toast.success(`Generated ${data.generated} descriptions!`, { duration: 5000 })
+
+      // Refresh leads
+      await fetchLeads(selectedCampaignId)
+
+      // Clear selection
+      setSelectedLeads([])
+      setSelectAll(false)
+    } catch (error) {
+      console.error('Bulk generate descriptions error:', error)
+      toast.error('Failed to generate descriptions')
+    } finally {
+      setBulkGeneratingDescriptions(false)
+    }
+  }
+
+  const handleBulkGenerateEmails = async () => {
+    if (selectedLeads.length === 0) {
+      toast.error('Please select leads first')
+      return
+    }
+
+    if (!bulkEmailCompanyInfo.trim()) {
+      toast.error('Please enter your company information for email generation')
+      return
+    }
+
+    // Create new AbortController
+    abortControllerEmails.current = new AbortController()
+    setBulkGeneratingEmails(true)
+
+    try {
+      const token = localStorage.getItem('access_token')
+      if (!token) {
+        toast.error('You must be logged in')
+        setBulkGeneratingEmails(false)
+        return
+      }
+
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/v1/campaigns/${selectedCampaignId}/bulk-generate-emails`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            lead_ids: selectedLeads,
+            company_info: bulkEmailCompanyInfo
+          }),
+          signal: abortControllerEmails.current.signal
+        }
+      )
+
+      if (!response.ok) {
+        throw new Error('Failed to generate emails')
+      }
+
+      const data = await response.json()
+      toast.success(`Generated ${data.generated} emails!`, { duration: 5000 })
+
+      // Refresh leads
+      await fetchLeads(selectedCampaignId)
+
+      // Clear selection
+      setSelectedLeads([])
+      setSelectAll(false)
+    } catch (error: any) {
+      if (error.name === 'AbortError') {
+        toast.error('Email generation cancelled')
+      } else {
+        console.error('Bulk generate emails error:', error)
+        toast.error('Failed to generate emails')
+      }
+    } finally {
+      setBulkGeneratingEmails(false)
+      abortControllerEmails.current = null
+    }
+  }
+
+  const cancelBulkGenerateEmails = () => {
+    if (abortControllerEmails.current) {
+      abortControllerEmails.current.abort()
+      toast.info('Cancelling email generation...')
+    }
+  }
+
+  const handleBulkGenerateWhatsApp = async () => {
+    if (selectedLeads.length === 0) {
+      toast.error('Please select leads first')
+      return
+    }
+
+    if (!bulkWhatsAppCompanyInfo.trim()) {
+      toast.error('Please enter your company information for WhatsApp generation')
+      return
+    }
+
+    // Create new AbortController
+    abortControllerWhatsApp.current = new AbortController()
+    setBulkGeneratingWhatsApp(true)
+
+    try {
+      const token = localStorage.getItem('access_token')
+      if (!token) {
+        toast.error('You must be logged in')
+        setBulkGeneratingWhatsApp(false)
+        return
+      }
+
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/v1/campaigns/${selectedCampaignId}/bulk-generate-whatsapp`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            lead_ids: selectedLeads,
+            company_info: bulkWhatsAppCompanyInfo
+          }),
+          signal: abortControllerWhatsApp.current.signal
+        }
+      )
+
+      if (!response.ok) {
+        throw new Error('Failed to generate WhatsApp messages')
+      }
+
+      const data = await response.json()
+      toast.success(`Generated ${data.generated} WhatsApp messages!`, { duration: 5000 })
+
+      // Refresh leads
+      await fetchLeads(selectedCampaignId)
+
+      // Clear selection
+      setSelectedLeads([])
+      setSelectAll(false)
+    } catch (error: any) {
+      if (error.name === 'AbortError') {
+        toast.error('WhatsApp generation cancelled')
+      } else {
+        console.error('Bulk generate WhatsApp error:', error)
+        toast.error('Failed to generate WhatsApp messages')
+      }
+    } finally {
+      setBulkGeneratingWhatsApp(false)
+      abortControllerWhatsApp.current = null
+    }
+  }
+
+  const cancelBulkGenerateWhatsApp = () => {
+    if (abortControllerWhatsApp.current) {
+      abortControllerWhatsApp.current.abort()
+      toast.info('Cancelling WhatsApp generation...')
+    }
+  }
+
+  const handleSendEmails = async () => {
+    if (selectedLeads.length === 0) {
+      toast.error('Please select leads first')
+      return
+    }
+
+    if (!senderEmail || !senderPassword) {
+      toast.error('Please enter Gmail credentials')
+      return
+    }
+
+    setSendingEmails(true)
+
+    try {
+      const token = localStorage.getItem('access_token')
+      if (!token) {
+        toast.error('You must be logged in')
+        return
+      }
+
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/v1/campaigns/${selectedCampaignId}/send-emails-to-leads`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            lead_ids: selectedLeads,
+            sender_email: senderEmail,
+            sender_password: senderPassword,
+            min_delay: 5,
+            max_delay: 15
+          })
+        }
+      )
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || 'Failed to send emails')
+      }
+
+      const data = await response.json()
+      toast.success(`Sent ${data.sent} emails successfully!`, { duration: 6000 })
+
+      // Close dialog
+      setShowSendEmailDialog(false)
+      setSenderEmail('')
+      setSenderPassword('')
+
+      // Refresh leads
+      await fetchLeads(selectedCampaignId)
+
+      // Clear selection
+      setSelectedLeads([])
+      setSelectAll(false)
+    } catch (error: any) {
+      console.error('Send emails error:', error)
+      toast.error(error.message || 'Failed to send emails')
+    } finally {
+      setSendingEmails(false)
+    }
+  }
+
+  const handleSendWhatsApp = async () => {
+    if (selectedLeads.length === 0) {
+      toast.error('Please select leads first')
+      return
+    }
+
+    if (!whatsappPhoneNumberId || !whatsappAccessToken) {
+      toast.error('Please enter WhatsApp Business API credentials')
+      return
+    }
+
+    setSendingWhatsApp(true)
+
+    try {
+      const token = localStorage.getItem('access_token')
+      if (!token) {
+        toast.error('You must be logged in')
+        return
+      }
+
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/v1/campaigns/${selectedCampaignId}/send-whatsapp`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            lead_ids: selectedLeads,
+            phone_number_id: whatsappPhoneNumberId,
+            access_token: whatsappAccessToken,
+            min_delay: 5,
+            max_delay: 15
+          })
+        }
+      )
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || 'Failed to send WhatsApp messages')
+      }
+
+      const data = await response.json()
+      toast.success(`Sent ${data.sent} WhatsApp messages successfully!`, { duration: 6000 })
+
+      // Close dialog
+      setShowSendWhatsAppDialog(false)
+      setWhatsappPhoneNumberId('')
+      setWhatsappAccessToken('')
+
+      // Refresh leads
+      await fetchLeads(selectedCampaignId)
+
+      // Clear selection
+      setSelectedLeads([])
+      setSelectAll(false)
+    } catch (error: any) {
+      console.error('Send WhatsApp error:', error)
+      toast.error(error.message || 'Failed to send WhatsApp messages')
+    } finally {
+      setSendingWhatsApp(false)
+    }
+  }
+
   const tableColumns = [
-    { key: 'title', label: 'Name', width: '25%' },
-    { key: 'address', label: 'Address', width: '25%' },
-    { key: 'phone', label: 'Phone', width: '15%' },
-    { key: 'category', label: 'Category', width: '15%' },
     {
-      key: 'rating',
-      label: 'Rating',
+      key: 'select',
+      label: (
+        <input
+          type="checkbox"
+          checked={selectAll}
+          onChange={handleSelectAll}
+          className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+        />
+      ),
+      width: '3%',
       align: 'center' as const,
-      width: '10%',
-      render: (val: number) => val ? <Badge variant="info">{val} ⭐</Badge> : '-'
+      render: (_val: any, lead: any) => (
+        <input
+          type="checkbox"
+          checked={selectedLeads.includes(lead.id)}
+          onChange={() => handleSelectLead(lead.id)}
+          className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+        />
+      )
     },
+    { key: 'title', label: 'Name', width: '22%' },
+    { key: 'address', label: 'Address', width: '22%' },
+    { key: 'phone', label: 'Phone', width: '13%' },
+    { key: 'category', label: 'Category', width: '13%' },
     {
       key: 'website',
       label: 'Website',
@@ -922,11 +1526,11 @@ export default function LeadsPage() {
                 Processing...
               </span>
               <button
-                onClick={() => removePendingTask(lead.id)}
-                className="p-1 text-gray-400 hover:text-red-500 transition-colors"
-                title="Dismiss"
+                onClick={() => handleCancelGeneration(lead.id, 'description')}
+                className="p-1 text-red-600 hover:text-red-700 hover:bg-red-50 rounded transition-colors"
+                title="Cancel Generation"
               >
-                <X className="w-3 h-3" />
+                <X className="w-4 h-4" />
               </button>
             </div>
           )
@@ -965,6 +1569,72 @@ export default function LeadsPage() {
       }
     },
     {
+      key: 'deep_research',
+      label: 'Deep Research',
+      width: '30%',
+      render: (val: string, lead: any) => {
+        const isPending = pendingTasks.some(t => t.leadId === lead.id && t.type === 'deep_research')
+        const isGenerating = generatingDeepResearchId === lead.id
+
+        if (val) {
+          return (
+            <div className="text-sm text-gray-700 max-w-xs truncate" title={val}>
+              {val}
+            </div>
+          )
+        }
+
+        if (isPending) {
+          return (
+            <div className="flex items-center gap-2">
+              <span className="px-3 py-1.5 text-xs font-medium text-amber-700 bg-amber-50 rounded-md flex items-center gap-1.5">
+                <Clock className="w-3 h-3 animate-pulse" />
+                Processing (15-30 min)...
+              </span>
+              <button
+                onClick={() => handleCancelGeneration(lead.id, 'deep_research')}
+                className="p-1 text-red-600 hover:text-red-700 hover:bg-red-50 rounded transition-colors"
+                title="Cancel Generation"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )
+        }
+
+        return (
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => handleGenerateDeepResearch(lead.id)}
+              disabled={isGenerating}
+              className="px-3 py-1.5 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+            >
+              {isGenerating ? (
+                <>
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Queuing...
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-3 h-3" />
+                  Research
+                </>
+              )}
+            </button>
+            {isGenerating && (
+              <button
+                onClick={() => handleCancelGeneration(lead.id, 'deep_research')}
+                className="p-1 text-gray-400 hover:text-red-500 transition-colors"
+                title="Cancel"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+        )
+      }
+    },
+    {
       key: 'generated_email',
       label: 'AI Email',
       width: '30%',
@@ -988,11 +1658,11 @@ export default function LeadsPage() {
                 Processing...
               </span>
               <button
-                onClick={() => removePendingTask(lead.id)}
-                className="p-1 text-gray-400 hover:text-red-500 transition-colors"
-                title="Dismiss"
+                onClick={() => handleCancelGeneration(lead.id, 'email')}
+                className="p-1 text-red-600 hover:text-red-700 hover:bg-red-50 rounded transition-colors"
+                title="Cancel Generation"
               >
-                <X className="w-3 h-3" />
+                <X className="w-4 h-4" />
               </button>
             </div>
           )
@@ -1020,6 +1690,72 @@ export default function LeadsPage() {
             {isGenerating && (
               <button
                 onClick={() => handleCancelGeneration(lead.id, 'email')}
+                className="p-1 text-gray-400 hover:text-red-500 transition-colors"
+                title="Cancel"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+        )
+      }
+    },
+    {
+      key: 'generated_whatsapp',
+      label: 'AI WhatsApp',
+      width: '30%',
+      render: (val: string, lead: any) => {
+        const isPending = pendingTasks.some(t => t.leadId === lead.id && t.type === 'whatsapp')
+        const isGenerating = generatingWhatsappId === lead.id
+
+        if (val) {
+          return (
+            <div className="text-sm text-gray-700 max-w-xs truncate" title={val}>
+              {val}
+            </div>
+          )
+        }
+
+        if (isPending) {
+          return (
+            <div className="flex items-center gap-2">
+              <span className="px-3 py-1.5 text-xs font-medium text-amber-700 bg-amber-50 rounded-md flex items-center gap-1.5">
+                <Clock className="w-3 h-3 animate-pulse" />
+                Processing...
+              </span>
+              <button
+                onClick={() => handleCancelGeneration(lead.id, 'whatsapp')}
+                className="p-1 text-red-600 hover:text-red-700 hover:bg-red-50 rounded transition-colors"
+                title="Cancel Generation"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )
+        }
+
+        return (
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => handleGenerateWhatsappClick(lead)}
+              disabled={isGenerating}
+              className="px-3 py-1.5 text-xs font-medium text-green-700 bg-green-50 hover:bg-green-100 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+            >
+              {isGenerating ? (
+                <>
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Queuing...
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-3 h-3" />
+                  Generate
+                </>
+              )}
+            </button>
+            {isGenerating && (
+              <button
+                onClick={() => handleCancelGeneration(lead.id, 'whatsapp')}
                 className="p-1 text-gray-400 hover:text-red-500 transition-colors"
                 title="Cancel"
               >
@@ -1207,18 +1943,36 @@ export default function LeadsPage() {
                       Max Results
                     </label>
                     <input
-                      type="range"
-                      min="10"
-                      max="100"
-                      step="10"
+                      type="number"
+                      min="1"
+                      max="500"
                       value={googleMaxResults}
-                      onChange={(e) => setGoogleMaxResults(Number(e.target.value))}
-                      className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                      onChange={(e) => {
+                        const value = Number(e.target.value)
+                        if (value > 500) {
+                          setGoogleMaxResults(500)
+                          toast.error('Maximum 500 results allowed for Google Maps')
+                        } else if (value < 1) {
+                          setGoogleMaxResults(1)
+                          toast.error('Minimum 1 result required')
+                        } else {
+                          setGoogleMaxResults(value)
+                        }
+                      }}
+                      onBlur={(e) => {
+                        const value = Number(e.target.value)
+                        if (!value || value < 1) setGoogleMaxResults(50)
+                      }}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
                     />
-                    <div className="flex justify-between text-xs text-gray-600 mt-1">
-                      <span>10</span>
-                      <span className="font-medium text-primary-600">{googleMaxResults}</span>
-                      <span>100</span>
+                    <div className="mt-1 space-y-1">
+                      <p className="text-xs text-gray-500">Maximum: 500 results for Google Maps</p>
+                      {googleMaxResults >= 100 && (
+                        <div className="flex items-start gap-1 text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                          <span>⚠</span>
+                          <span>Scraping {googleMaxResults} results may take {Math.ceil(googleMaxResults / 10)}-{Math.ceil(googleMaxResults / 5)} minutes</span>
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1256,6 +2010,15 @@ export default function LeadsPage() {
                       <div className="w-full max-w-md bg-primary-200 rounded-full h-2 overflow-hidden">
                         <div className="bg-primary-600 h-2 rounded-full animate-pulse" style={{ width: '60%' }}></div>
                       </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        leftIcon={<X className="h-4 w-4" />}
+                        onClick={handleCancelLeadGeneration}
+                        className="text-red-600 hover:bg-red-50 border-red-300"
+                      >
+                        Stop Generation
+                      </Button>
                     </div>
                   </div>
                 )}
@@ -1333,6 +2096,136 @@ export default function LeadsPage() {
                         </Button>
                       </div>
                     </div>
+
+                    {/* Bulk Actions Toolbar */}
+                    {selectedLeads.length > 0 && (
+                      <div className="mb-4 bg-blue-50 border border-blue-200 rounded-lg p-4">
+                        <div className="flex items-center justify-between flex-wrap gap-3">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold text-blue-900">
+                              {selectedLeads.length} lead{selectedLeads.length > 1 ? 's' : ''} selected
+                            </span>
+                            <button
+                              onClick={() => {
+                                setSelectedLeads([])
+                                setSelectAll(false)
+                              }}
+                              className="text-xs text-blue-700 hover:text-blue-900 underline"
+                            >
+                              Clear selection
+                            </button>
+                          </div>
+
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              leftIcon={<Sparkles className="h-4 w-4" />}
+                              onClick={handleBulkGenerateDescriptions}
+                              disabled={bulkGeneratingDescriptions}
+                              className="bg-white hover:bg-blue-50 border-blue-300"
+                            >
+                              {bulkGeneratingDescriptions ? 'Generating...' : 'Generate Descriptions'}
+                            </Button>
+
+                            {bulkGeneratingEmails ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                leftIcon={<X className="h-4 w-4" />}
+                                onClick={cancelBulkGenerateEmails}
+                                className="bg-red-50 hover:bg-red-100 border-red-300 text-red-700"
+                              >
+                                Cancel Email Generation
+                              </Button>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                leftIcon={<Mail className="h-4 w-4" />}
+                                onClick={handleBulkGenerateEmails}
+                                disabled={!bulkEmailCompanyInfo.trim()}
+                                className="bg-white hover:bg-purple-50 border-purple-300"
+                                title={!bulkEmailCompanyInfo.trim() ? 'Enter company info first' : ''}
+                              >
+                                Generate Emails
+                              </Button>
+                            )}
+
+                            {bulkGeneratingWhatsApp ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                leftIcon={<X className="h-4 w-4" />}
+                                onClick={cancelBulkGenerateWhatsApp}
+                                className="bg-red-50 hover:bg-red-100 border-red-300 text-red-700"
+                              >
+                                Cancel WhatsApp Generation
+                              </Button>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                leftIcon={<MessageCircle className="h-4 w-4" />}
+                                onClick={handleBulkGenerateWhatsApp}
+                                disabled={!bulkWhatsAppCompanyInfo.trim()}
+                                className="bg-white hover:bg-green-50 border-green-300"
+                                title={!bulkWhatsAppCompanyInfo.trim() ? 'Enter company info first' : ''}
+                              >
+                                Generate WhatsApp
+                              </Button>
+                            )}
+
+                            <Button
+                              size="sm"
+                              leftIcon={<Send className="h-4 w-4" />}
+                              onClick={() => setShowSendEmailDialog(true)}
+                              className="bg-green-600 hover:bg-green-700 text-white"
+                            >
+                              Send Emails
+                            </Button>
+
+                            <Button
+                              size="sm"
+                              leftIcon={<Send className="h-4 w-4" />}
+                              onClick={() => setShowSendWhatsAppDialog(true)}
+                              className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                            >
+                              Send WhatsApp
+                            </Button>
+                          </div>
+                        </div>
+
+                        {/* Company Info Input for Email Generation */}
+                        <div className="mt-3 pt-3 border-t border-blue-200">
+                          <label className="block text-sm font-medium text-blue-900 mb-2">
+                            Company Information (for email generation)
+                          </label>
+                          <textarea
+                            value={bulkEmailCompanyInfo}
+                            onChange={(e) => setBulkEmailCompanyInfo(e.target.value)}
+                            placeholder="Enter information about your company to help AI generate personalized cold emails..."
+                            className="w-full px-3 py-2 text-sm border border-blue-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            rows={2}
+                          />
+                        </div>
+
+                        {/* Company Info Input for WhatsApp Generation */}
+                        <div className="mt-3 pt-3 border-t border-blue-200">
+                          <label className="block text-sm font-medium text-blue-900 mb-2">
+                            Company Information (for WhatsApp generation)
+                          </label>
+                          <textarea
+                            value={bulkWhatsAppCompanyInfo}
+                            onChange={(e) => setBulkWhatsAppCompanyInfo(e.target.value)}
+                            placeholder="Enter information about your company to help AI generate personalized WhatsApp messages..."
+                            className="w-full px-3 py-2 text-sm border border-green-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                            rows={2}
+                          />
+                        </div>
+                      </div>
+                    )}
+
                     <Table columns={tableColumns} data={leads} />
                   </div>
                 ) : (
@@ -1366,18 +2259,36 @@ export default function LeadsPage() {
                       Max Results
                     </label>
                     <input
-                      type="range"
-                      min="5"
-                      max="50"
-                      step="5"
+                      type="number"
+                      min="1"
+                      max="200"
                       value={linkedinMaxResults}
-                      onChange={(e) => setLinkedinMaxResults(Number(e.target.value))}
-                      className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                      onChange={(e) => {
+                        const value = Number(e.target.value)
+                        if (value > 200) {
+                          setLinkedinMaxResults(200)
+                          toast.error('Maximum 200 results allowed for LinkedIn')
+                        } else if (value < 1) {
+                          setLinkedinMaxResults(1)
+                          toast.error('Minimum 1 result required')
+                        } else {
+                          setLinkedinMaxResults(value)
+                        }
+                      }}
+                      onBlur={(e) => {
+                        const value = Number(e.target.value)
+                        if (!value || value < 1) setLinkedinMaxResults(25)
+                      }}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
                     />
-                    <div className="flex justify-between text-xs text-gray-600 mt-1">
-                      <span>5</span>
-                      <span className="font-medium text-primary-600">{linkedinMaxResults}</span>
-                      <span>50</span>
+                    <div className="mt-1 space-y-1">
+                      <p className="text-xs text-gray-500">Maximum: 200 results for LinkedIn</p>
+                      {linkedinMaxResults >= 100 && (
+                        <div className="flex items-start gap-1 text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                          <span>⚠</span>
+                          <span>Scraping {linkedinMaxResults} results may take {Math.ceil(linkedinMaxResults / 8)}-{Math.ceil(linkedinMaxResults / 4)} minutes</span>
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1407,6 +2318,15 @@ export default function LeadsPage() {
                       <div className="w-full max-w-md bg-blue-200 rounded-full h-2 overflow-hidden">
                         <div className="bg-blue-600 h-2 rounded-full animate-pulse" style={{ width: '60%' }}></div>
                       </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        leftIcon={<X className="h-4 w-4" />}
+                        onClick={handleCancelLeadGeneration}
+                        className="text-red-600 hover:bg-red-50 border-red-300"
+                      >
+                        Stop Generation
+                      </Button>
                     </div>
                   </div>
                 )}
@@ -1483,6 +2403,136 @@ export default function LeadsPage() {
                         </Button>
                       </div>
                     </div>
+
+                    {/* Bulk Actions Toolbar */}
+                    {selectedLeads.length > 0 && (
+                      <div className="mb-4 bg-blue-50 border border-blue-200 rounded-lg p-4">
+                        <div className="flex items-center justify-between flex-wrap gap-3">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold text-blue-900">
+                              {selectedLeads.length} lead{selectedLeads.length > 1 ? 's' : ''} selected
+                            </span>
+                            <button
+                              onClick={() => {
+                                setSelectedLeads([])
+                                setSelectAll(false)
+                              }}
+                              className="text-xs text-blue-700 hover:text-blue-900 underline"
+                            >
+                              Clear selection
+                            </button>
+                          </div>
+
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              leftIcon={<Sparkles className="h-4 w-4" />}
+                              onClick={handleBulkGenerateDescriptions}
+                              disabled={bulkGeneratingDescriptions}
+                              className="bg-white hover:bg-blue-50 border-blue-300"
+                            >
+                              {bulkGeneratingDescriptions ? 'Generating...' : 'Generate Descriptions'}
+                            </Button>
+
+                            {bulkGeneratingEmails ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                leftIcon={<X className="h-4 w-4" />}
+                                onClick={cancelBulkGenerateEmails}
+                                className="bg-red-50 hover:bg-red-100 border-red-300 text-red-700"
+                              >
+                                Cancel Email Generation
+                              </Button>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                leftIcon={<Mail className="h-4 w-4" />}
+                                onClick={handleBulkGenerateEmails}
+                                disabled={!bulkEmailCompanyInfo.trim()}
+                                className="bg-white hover:bg-purple-50 border-purple-300"
+                                title={!bulkEmailCompanyInfo.trim() ? 'Enter company info first' : ''}
+                              >
+                                Generate Emails
+                              </Button>
+                            )}
+
+                            {bulkGeneratingWhatsApp ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                leftIcon={<X className="h-4 w-4" />}
+                                onClick={cancelBulkGenerateWhatsApp}
+                                className="bg-red-50 hover:bg-red-100 border-red-300 text-red-700"
+                              >
+                                Cancel WhatsApp Generation
+                              </Button>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                leftIcon={<MessageCircle className="h-4 w-4" />}
+                                onClick={handleBulkGenerateWhatsApp}
+                                disabled={!bulkWhatsAppCompanyInfo.trim()}
+                                className="bg-white hover:bg-green-50 border-green-300"
+                                title={!bulkWhatsAppCompanyInfo.trim() ? 'Enter company info first' : ''}
+                              >
+                                Generate WhatsApp
+                              </Button>
+                            )}
+
+                            <Button
+                              size="sm"
+                              leftIcon={<Send className="h-4 w-4" />}
+                              onClick={() => setShowSendEmailDialog(true)}
+                              className="bg-green-600 hover:bg-green-700 text-white"
+                            >
+                              Send Emails
+                            </Button>
+
+                            <Button
+                              size="sm"
+                              leftIcon={<Send className="h-4 w-4" />}
+                              onClick={() => setShowSendWhatsAppDialog(true)}
+                              className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                            >
+                              Send WhatsApp
+                            </Button>
+                          </div>
+                        </div>
+
+                        {/* Company Info Input for Email Generation */}
+                        <div className="mt-3 pt-3 border-t border-blue-200">
+                          <label className="block text-sm font-medium text-blue-900 mb-2">
+                            Company Information (for email generation)
+                          </label>
+                          <textarea
+                            value={bulkEmailCompanyInfo}
+                            onChange={(e) => setBulkEmailCompanyInfo(e.target.value)}
+                            placeholder="Enter information about your company to help AI generate personalized cold emails..."
+                            className="w-full px-3 py-2 text-sm border border-blue-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            rows={2}
+                          />
+                        </div>
+
+                        {/* Company Info Input for WhatsApp Generation */}
+                        <div className="mt-3 pt-3 border-t border-blue-200">
+                          <label className="block text-sm font-medium text-blue-900 mb-2">
+                            Company Information (for WhatsApp generation)
+                          </label>
+                          <textarea
+                            value={bulkWhatsAppCompanyInfo}
+                            onChange={(e) => setBulkWhatsAppCompanyInfo(e.target.value)}
+                            placeholder="Enter information about your company to help AI generate personalized WhatsApp messages..."
+                            className="w-full px-3 py-2 text-sm border border-green-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                            rows={2}
+                          />
+                        </div>
+                      </div>
+                    )}
+
                     <Table columns={tableColumns} data={leads} />
                   </div>
                 ) : (
@@ -1516,18 +2566,36 @@ export default function LeadsPage() {
                       Max Results
                     </label>
                     <input
-                      type="range"
-                      min="10"
-                      max="50"
-                      step="10"
+                      type="number"
+                      min="1"
+                      max="300"
                       value={instagramMaxResults}
-                      onChange={(e) => setInstagramMaxResults(Number(e.target.value))}
-                      className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                      onChange={(e) => {
+                        const value = Number(e.target.value)
+                        if (value > 300) {
+                          setInstagramMaxResults(300)
+                          toast.error('Maximum 300 results allowed for Instagram')
+                        } else if (value < 1) {
+                          setInstagramMaxResults(1)
+                          toast.error('Minimum 1 result required')
+                        } else {
+                          setInstagramMaxResults(value)
+                        }
+                      }}
+                      onBlur={(e) => {
+                        const value = Number(e.target.value)
+                        if (!value || value < 1) setInstagramMaxResults(30)
+                      }}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
                     />
-                    <div className="flex justify-between text-xs text-gray-600 mt-1">
-                      <span>10</span>
-                      <span className="font-medium text-primary-600">{instagramMaxResults}</span>
-                      <span>50</span>
+                    <div className="mt-1 space-y-1">
+                      <p className="text-xs text-gray-500">Maximum: 300 results for Instagram</p>
+                      {instagramMaxResults >= 100 && (
+                        <div className="flex items-start gap-1 text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                          <span>⚠</span>
+                          <span>Scraping {instagramMaxResults} results may take {Math.ceil(instagramMaxResults / 10)}-{Math.ceil(instagramMaxResults / 6)} minutes</span>
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1557,6 +2625,15 @@ export default function LeadsPage() {
                       <div className="w-full max-w-md bg-pink-200 rounded-full h-2 overflow-hidden">
                         <div className="bg-pink-600 h-2 rounded-full animate-pulse" style={{ width: '60%' }}></div>
                       </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        leftIcon={<X className="h-4 w-4" />}
+                        onClick={handleCancelLeadGeneration}
+                        className="text-red-600 hover:bg-red-50 border-red-300"
+                      >
+                        Stop Generation
+                      </Button>
                     </div>
                   </div>
                 )}
@@ -1633,6 +2710,136 @@ export default function LeadsPage() {
                         </Button>
                       </div>
                     </div>
+
+                    {/* Bulk Actions Toolbar */}
+                    {selectedLeads.length > 0 && (
+                      <div className="mb-4 bg-blue-50 border border-blue-200 rounded-lg p-4">
+                        <div className="flex items-center justify-between flex-wrap gap-3">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold text-blue-900">
+                              {selectedLeads.length} lead{selectedLeads.length > 1 ? 's' : ''} selected
+                            </span>
+                            <button
+                              onClick={() => {
+                                setSelectedLeads([])
+                                setSelectAll(false)
+                              }}
+                              className="text-xs text-blue-700 hover:text-blue-900 underline"
+                            >
+                              Clear selection
+                            </button>
+                          </div>
+
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              leftIcon={<Sparkles className="h-4 w-4" />}
+                              onClick={handleBulkGenerateDescriptions}
+                              disabled={bulkGeneratingDescriptions}
+                              className="bg-white hover:bg-blue-50 border-blue-300"
+                            >
+                              {bulkGeneratingDescriptions ? 'Generating...' : 'Generate Descriptions'}
+                            </Button>
+
+                            {bulkGeneratingEmails ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                leftIcon={<X className="h-4 w-4" />}
+                                onClick={cancelBulkGenerateEmails}
+                                className="bg-red-50 hover:bg-red-100 border-red-300 text-red-700"
+                              >
+                                Cancel Email Generation
+                              </Button>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                leftIcon={<Mail className="h-4 w-4" />}
+                                onClick={handleBulkGenerateEmails}
+                                disabled={!bulkEmailCompanyInfo.trim()}
+                                className="bg-white hover:bg-purple-50 border-purple-300"
+                                title={!bulkEmailCompanyInfo.trim() ? 'Enter company info first' : ''}
+                              >
+                                Generate Emails
+                              </Button>
+                            )}
+
+                            {bulkGeneratingWhatsApp ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                leftIcon={<X className="h-4 w-4" />}
+                                onClick={cancelBulkGenerateWhatsApp}
+                                className="bg-red-50 hover:bg-red-100 border-red-300 text-red-700"
+                              >
+                                Cancel WhatsApp Generation
+                              </Button>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                leftIcon={<MessageCircle className="h-4 w-4" />}
+                                onClick={handleBulkGenerateWhatsApp}
+                                disabled={!bulkWhatsAppCompanyInfo.trim()}
+                                className="bg-white hover:bg-green-50 border-green-300"
+                                title={!bulkWhatsAppCompanyInfo.trim() ? 'Enter company info first' : ''}
+                              >
+                                Generate WhatsApp
+                              </Button>
+                            )}
+
+                            <Button
+                              size="sm"
+                              leftIcon={<Send className="h-4 w-4" />}
+                              onClick={() => setShowSendEmailDialog(true)}
+                              className="bg-green-600 hover:bg-green-700 text-white"
+                            >
+                              Send Emails
+                            </Button>
+
+                            <Button
+                              size="sm"
+                              leftIcon={<Send className="h-4 w-4" />}
+                              onClick={() => setShowSendWhatsAppDialog(true)}
+                              className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                            >
+                              Send WhatsApp
+                            </Button>
+                          </div>
+                        </div>
+
+                        {/* Company Info Input for Email Generation */}
+                        <div className="mt-3 pt-3 border-t border-blue-200">
+                          <label className="block text-sm font-medium text-blue-900 mb-2">
+                            Company Information (for email generation)
+                          </label>
+                          <textarea
+                            value={bulkEmailCompanyInfo}
+                            onChange={(e) => setBulkEmailCompanyInfo(e.target.value)}
+                            placeholder="Enter information about your company to help AI generate personalized cold emails..."
+                            className="w-full px-3 py-2 text-sm border border-blue-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            rows={2}
+                          />
+                        </div>
+
+                        {/* Company Info Input for WhatsApp Generation */}
+                        <div className="mt-3 pt-3 border-t border-blue-200">
+                          <label className="block text-sm font-medium text-blue-900 mb-2">
+                            Company Information (for WhatsApp generation)
+                          </label>
+                          <textarea
+                            value={bulkWhatsAppCompanyInfo}
+                            onChange={(e) => setBulkWhatsAppCompanyInfo(e.target.value)}
+                            placeholder="Enter information about your company to help AI generate personalized WhatsApp messages..."
+                            className="w-full px-3 py-2 text-sm border border-green-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                            rows={2}
+                          />
+                        </div>
+                      </div>
+                    )}
+
                     <Table columns={tableColumns} data={leads} />
                   </div>
                 ) : (
@@ -1943,6 +3150,20 @@ export default function LeadsPage() {
                 />
               </div>
 
+              {/* Deep Research */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                  Deep Research
+                </label>
+                <textarea
+                  value={editingLead.deep_research || ''}
+                  onChange={(e) => setEditingLead({ ...editingLead, deep_research: e.target.value })}
+                  rows={8}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent resize-none"
+                  placeholder="AI-generated deep business research..."
+                />
+              </div>
+
               {/* Generated Email */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">
@@ -1954,6 +3175,20 @@ export default function LeadsPage() {
                   rows={6}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent resize-none"
                   placeholder="AI-generated email content..."
+                />
+              </div>
+
+              {/* Generated WhatsApp */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                  AI WhatsApp Message
+                </label>
+                <textarea
+                  value={editingLead.generated_whatsapp || ''}
+                  onChange={(e) => setEditingLead({ ...editingLead, generated_whatsapp: e.target.value })}
+                  rows={4}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent resize-none"
+                  placeholder="AI-generated WhatsApp message..."
                 />
               </div>
             </div>
@@ -2060,6 +3295,274 @@ export default function LeadsPage() {
                   </>
                 )}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* WhatsApp Generation Modal */}
+      {showWhatsappModal && currentLeadForWhatsapp && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4">
+            <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between rounded-t-lg">
+              <h2 className="text-xl font-semibold text-gray-900">Generate AI WhatsApp for {currentLeadForWhatsapp.title}</h2>
+              <button
+                onClick={() => {
+                  setShowWhatsappModal(false)
+                  setWhatsappCompanyInfo('')
+                  setCurrentLeadForWhatsapp(null)
+                }}
+                className="text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            <div className="px-6 py-4 space-y-4">
+              <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                <div className="flex gap-3">
+                  <Sparkles className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+                  <div className="text-sm text-green-900">
+                    <p className="font-semibold mb-1">AI WhatsApp Generation</p>
+                    <p className="text-green-800">
+                      Our AI will create a personalized WhatsApp message for <strong>{currentLeadForWhatsapp.title}</strong> based on your company information.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Your Company Information *
+                </label>
+                <textarea
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent resize-none"
+                  rows={6}
+                  placeholder="Example: We are Elite Creatif, a digital marketing agency based in Dubai. We specialize in SEO, social media management, and targeted advertising for restaurants and retail businesses."
+                  value={whatsappCompanyInfo}
+                  onChange={(e) => setWhatsappCompanyInfo(e.target.value)}
+                  autoFocus
+                />
+                <p className="text-xs text-gray-600 mt-1">
+                  AI uses this to create a friendly WhatsApp message introducing your company
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-gray-50 border-t border-gray-200 px-6 py-4 flex items-center justify-end gap-3 rounded-b-lg">
+              <button
+                onClick={() => {
+                  setShowWhatsappModal(false)
+                  setWhatsappCompanyInfo('')
+                  setCurrentLeadForWhatsapp(null)
+                }}
+                className="px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors font-medium"
+                disabled={generatingWhatsappId !== null}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleGenerateWhatsapp}
+                disabled={generatingWhatsappId !== null || !whatsappCompanyInfo.trim()}
+                className="px-4 py-2 text-white bg-green-600 rounded-lg hover:bg-green-700 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {generatingWhatsappId !== null ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Generating...
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-4 h-4" />
+                    Generate WhatsApp
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Send Email Dialog */}
+      {showSendEmailDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                <Send className="h-5 w-5 text-green-600" />
+                Send Emails to {selectedLeads.length} Lead{selectedLeads.length > 1 ? 's' : ''}
+              </h3>
+              <button
+                onClick={() => setShowSendEmailDialog(false)}
+                disabled={sendingEmails}
+                className="text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Gmail Address
+                </label>
+                <input
+                  type="email"
+                  value={senderEmail}
+                  onChange={(e) => setSenderEmail(e.target.value)}
+                  placeholder="your@gmail.com"
+                  disabled={sendingEmails}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent disabled:bg-gray-100"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Gmail App Password
+                </label>
+                <input
+                  type="password"
+                  value={senderPassword}
+                  onChange={(e) => setSenderPassword(e.target.value)}
+                  placeholder="App password (not regular password)"
+                  disabled={sendingEmails}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent disabled:bg-gray-100"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  Generate an app password at{' '}
+                  <a
+                    href="https://myaccount.google.com/apppasswords"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-green-600 hover:underline"
+                  >
+                    myaccount.google.com/apppasswords
+                  </a>
+                </p>
+              </div>
+
+              <div className="bg-amber-50 border border-amber-200 rounded-md p-3">
+                <p className="text-xs text-amber-800">
+                  <strong>Note:</strong> Emails will be sent with a 5-15 second delay between each to avoid spam filters.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex gap-3 justify-end mt-6">
+              <Button
+                variant="outline"
+                onClick={() => setShowSendEmailDialog(false)}
+                disabled={sendingEmails}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleSendEmails}
+                disabled={sendingEmails || !senderEmail || !senderPassword}
+                className="bg-green-600 hover:bg-green-700 text-white"
+                leftIcon={sendingEmails ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+              >
+                {sendingEmails ? 'Sending...' : `Send ${selectedLeads.length} Email${selectedLeads.length > 1 ? 's' : ''}`}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Send WhatsApp Dialog */}
+      {showSendWhatsAppDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                <Send className="h-5 w-5 text-emerald-600" />
+                Send WhatsApp to {selectedLeads.length} Lead{selectedLeads.length > 1 ? 's' : ''}
+              </h3>
+              <button
+                onClick={() => setShowSendWhatsAppDialog(false)}
+                disabled={sendingWhatsApp}
+                className="text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  WhatsApp Business Phone Number ID
+                </label>
+                <input
+                  type="text"
+                  value={whatsappPhoneNumberId}
+                  onChange={(e) => setWhatsappPhoneNumberId(e.target.value)}
+                  placeholder="123456789012345"
+                  disabled={sendingWhatsApp}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent disabled:bg-gray-100"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  Find this in your{' '}
+                  <a
+                    href="https://business.facebook.com/settings/whatsapp-business-accounts"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-emerald-600 hover:underline"
+                  >
+                    WhatsApp Business Account settings
+                  </a>
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  WhatsApp Business API Access Token
+                </label>
+                <input
+                  type="password"
+                  value={whatsappAccessToken}
+                  onChange={(e) => setWhatsappAccessToken(e.target.value)}
+                  placeholder="Your access token"
+                  disabled={sendingWhatsApp}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent disabled:bg-gray-100"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  Generate a token in{' '}
+                  <a
+                    href="https://developers.facebook.com/apps"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-emerald-600 hover:underline"
+                  >
+                    Meta for Developers
+                  </a>
+                </p>
+              </div>
+
+              <div className="bg-amber-50 border border-amber-200 rounded-md p-3">
+                <p className="text-xs text-amber-800">
+                  <strong>Note:</strong> WhatsApp messages will be sent with a 5-15 second delay between each to comply with rate limits.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex gap-3 justify-end mt-6">
+              <Button
+                variant="outline"
+                onClick={() => setShowSendWhatsAppDialog(false)}
+                disabled={sendingWhatsApp}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleSendWhatsApp}
+                disabled={sendingWhatsApp || !whatsappPhoneNumberId || !whatsappAccessToken}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                leftIcon={sendingWhatsApp ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+              >
+                {sendingWhatsApp ? 'Sending...' : `Send ${selectedLeads.length} WhatsApp${selectedLeads.length > 1 ? ' Messages' : ''}`}
+              </Button>
             </div>
           </div>
         </div>

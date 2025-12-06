@@ -56,12 +56,31 @@ class UserRegister(BaseModel):
     @validator('password')
     def password_strength(cls, v):
         """Ensure password has minimum complexity"""
-        if len(v) < 8:
-            raise ValueError('Password must be at least 8 characters')
+        # Length validation (8-128 chars to prevent DoS)
+        if not 8 <= len(v) <= 128:
+            raise ValueError('Password must be between 8 and 128 characters')
+
+        # Complexity requirements
         if not any(c.isupper() for c in v):
-            raise ValueError('Password must contain uppercase letter')
+            raise ValueError('Password must contain at least one uppercase letter')
+        if not any(c.islower() for c in v):
+            raise ValueError('Password must contain at least one lowercase letter')
         if not any(c.isdigit() for c in v):
-            raise ValueError('Password must contain a number')
+            raise ValueError('Password must contain at least one number')
+        if not any(c in '!@#$%^&*()_+-=[]{}|;:,.<>?' for c in v):
+            raise ValueError('Password must contain at least one special character (!@#$%^&* etc.)')
+
+        # Check against common passwords
+        common_passwords = {
+            'password123', 'password', '123456', '12345678', 'qwerty',
+            'abc123', 'password1', 'admin123', 'letmein', 'welcome',
+            'monkey', '1234567890', 'password123!', 'admin', 'root',
+            'user', 'test', 'guest', 'change-this-secure-password-immediately',
+            'change-this-to-a-secure-password'
+        }
+        if v.lower() in common_passwords:
+            raise ValueError('Password is too common. Please choose a more secure password')
+
         return v
 
 
