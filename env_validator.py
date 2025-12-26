@@ -124,11 +124,23 @@ def validate_jwt_secret():
     if not jwt_secret:
         return False, "JWT_SECRET is not set"
 
+    # Check minimum length (64 chars recommended for HS256)
     if len(jwt_secret) < 32:
-        return False, f"JWT_SECRET is too short ({len(jwt_secret)} chars). Minimum: 32 chars"
+        return False, f"JWT_SECRET is too short ({len(jwt_secret)} chars). Minimum: 32 chars, Recommended: 64+ chars"
 
-    if jwt_secret in ["your-secret-key-change-in-production", "change-me", "secret"]:
-        return False, "JWT_SECRET is using an insecure default value"
+    # Expanded list of dangerous default values
+    dangerous_defaults = [
+        "your-secret-key-change-in-production",
+        "your-jwt-secret-key-here-generate-with-secrets-token-urlsafe",
+        "change-me",
+        "secret",
+        "your-secret-here",
+        "jwt-secret",
+        "your_jwt_secret",
+    ]
+
+    if jwt_secret.lower() in [d.lower() for d in dangerous_defaults]:
+        return False, "JWT_SECRET is using an insecure default value! Generate a secure random value"
 
     return True, "JWT_SECRET is valid"
 
@@ -150,6 +162,86 @@ def validate_database_url():
     return True, "DATABASE_URL format is valid"
 
 
+def validate_admin_password():
+    """
+    Validate admin password is not using defaults
+    """
+    admin_password = os.getenv("ADMIN_PASSWORD", "")
+    environment = os.getenv("ENVIRONMENT", "development")
+
+    dangerous_defaults = [
+        "change-this-to-a-secure-password",
+        "change-this-secure-password-immediately",
+        "admin",
+        "password",
+        "admin123",
+        "password123",
+    ]
+
+    if environment == "production" and admin_password.lower() in [d.lower() for d in dangerous_defaults]:
+        return False, "ADMIN_PASSWORD is using a default/insecure value in PRODUCTION!"
+
+    return True, "ADMIN_PASSWORD is acceptable"
+
+
+def validate_encryption_key():
+    """
+    Validate encryption key format
+    """
+    encryption_key = os.getenv("ENCRYPTION_KEY", "")
+
+    if not encryption_key:
+        return True, "ENCRYPTION_KEY not set (optional)"
+
+    # Should be 64 hex characters (32 bytes)
+    if len(encryption_key) != 64:
+        return False, f"ENCRYPTION_KEY should be 64 hex characters, got {len(encryption_key)}"
+
+    # Check if it's a valid hex string
+    try:
+        int(encryption_key, 16)
+    except ValueError:
+        return False, "ENCRYPTION_KEY must be hexadecimal characters only"
+
+    # Check for default value
+    if encryption_key.lower() == "your-encryption-key-here-64-chars":
+        return False, "ENCRYPTION_KEY is using default value! Generate with: python -c \"import secrets; print(secrets.token_hex(32))\""
+
+    return True, "ENCRYPTION_KEY is valid"
+
+
+def validate_production_config():
+    """
+    Additional validations for production environment
+    """
+    environment = os.getenv("ENVIRONMENT", "development")
+
+    if environment != "production":
+        return True, "Not in production mode"
+
+    errors = []
+
+    # Check if using SQLite in production
+    db_url = os.getenv("DATABASE_URL", "")
+    if db_url.startswith("sqlite"):
+        errors.append("Using SQLite in production is not recommended. Use PostgreSQL instead.")
+
+    # Check if using Stripe test keys in production
+    stripe_key = os.getenv("STRIPE_SECRET_KEY", "")
+    if stripe_key.startswith("sk_test_"):
+        errors.append("Using Stripe TEST keys in production environment!")
+
+    # Check if SendGrid is configured
+    sendgrid_key = os.getenv("SENDGRID_API_KEY", "")
+    if sendgrid_key in ["your-sendgrid-api-key", ""]:
+        errors.append("SendGrid API key not configured for production")
+
+    if errors:
+        return False, "; ".join(errors)
+
+    return True, "Production configuration is valid"
+
+
 def run_all_validations():
     """
     Run all validation checks
@@ -157,16 +249,51 @@ def run_all_validations():
     # Check required environment variables
     EnvValidator.validate_and_exit_on_error()
 
+    errors = []
+    warnings = []
+
     # Additional security validations
     jwt_valid, jwt_msg = validate_jwt_secret()
     if not jwt_valid:
-        print(f"[ERROR] JWT Secret validation failed: {jwt_msg}")
-        sys.exit(1)
+        errors.append(f"JWT Secret: {jwt_msg}")
 
     db_valid, db_msg = validate_database_url()
     if not db_valid:
-        print(f"[ERROR] Database URL validation failed: {db_msg}")
+        errors.append(f"Database URL: {db_msg}")
+
+    admin_valid, admin_msg = validate_admin_password()
+    if not admin_valid:
+        errors.append(f"Admin Password: {admin_msg}")
+    elif "default" in admin_msg.lower():
+        warnings.append(f"Admin Password: {admin_msg}")
+
+    enc_valid, enc_msg = validate_encryption_key()
+    if not enc_valid:
+        errors.append(f"Encryption Key: {enc_msg}")
+
+    prod_valid, prod_msg = validate_production_config()
+    if not prod_valid:
+        errors.append(f"Production Config: {prod_msg}")
+
+    # Print results
+    if errors:
+        print("\n" + "="*60)
+        print("[ERROR] Security Validation Failed:")
+        print("="*60)
+        for error in errors:
+            print(f"  ❌ {error}")
+        print("="*60)
+        print("\nFix these issues before starting the application.")
+        print("See .env.example for reference.\n")
         sys.exit(1)
+
+    if warnings:
+        print("\n" + "="*60)
+        print("[WARNING] Security Warnings:")
+        print("="*60)
+        for warning in warnings:
+            print(f"  ⚠️  {warning}")
+        print("="*60 + "\n")
 
     print("[OK] All validations passed!\n")
 

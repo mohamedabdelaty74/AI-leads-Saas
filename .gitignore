@@ -114,6 +114,12 @@ Desktop.ini
 *.tmp
 *.temp
 
+# ===== Archive Files =====
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
 # ===== SSL/TLS Certificates =====
 *.pem
 *.crt
