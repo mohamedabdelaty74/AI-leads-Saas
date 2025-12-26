@@ -1,51 +1,42 @@
-# Elite Creatif - Docker Container for Vast.ai GPU
-FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04
+# Lightweight Dockerfile for Railway Deployment (API Mode)
+# NO GPU, NO torch, NO transformers - just HuggingFace API!
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TRANSFORMERS_CACHE=/app/models
-ENV HF_HOME=/app/models
+FROM python:3.10-slim
 
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
+# Install minimal system dependencies
 RUN apt-get update && apt-get install -y \
-    python3.10 \
-    python3-pip \
-    git \
-    wget \
     curl \
-    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
-RUN pip3 install --upgrade pip setuptools wheel
+RUN pip install --upgrade pip setuptools wheel
 
-# Copy requirements first (for Docker caching)
-COPY requirements.txt .
+# Copy ONLY the lightweight requirements
+COPY requirements-railway.txt .
 
-# Install Python dependencies
-RUN pip3 install --no-cache-dir -r requirements.txt
+# Install Python packages (lightweight - no ML libraries!)
+RUN pip install --no-cache-dir -r requirements-railway.txt
 
 # Copy project files
 COPY . .
 
 # Create necessary directories
-RUN mkdir -p /app/models \
-    /app/database \
-    /app/scraped_data \
-    /app/logs
+RUN mkdir -p /app/database /app/logs
 
-# Expose ports
-# 8000: Backend API
-# 7860: Gradio UI
-EXPOSE 8000 7860
+# Expose port
+EXPOSE 8000
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV USE_HF_API=true
+ENV ENVIRONMENT=production
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-    CMD curl -f http://localhost:7860 || exit 1
+    CMD curl -f http://localhost:8000/health || exit 1
 
-# Default command - run Gradio app
-CMD ["python3", "gradio_saas_integrated.py"]
+# Start FastAPI backend (NOT Gradio - that's for local development)
+CMD uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}
