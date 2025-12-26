@@ -1,14 +1,19 @@
 """
 AI Service - Qwen 2.5-7B Model Integration
 Handles AI-powered email generation for leads
+
+Supports TWO MODES:
+1. LOCAL MODE: Loads model locally (for development/high-volume production)
+2. API MODE: Uses HuggingFace Inference API (for easy deployment)
 """
 
 import os
 import logging
 import torch
+import requests
 from typing import Optional, List, Dict
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from huggingface_hub import login
+from huggingface_hub import login, InferenceClient
 from dotenv import load_dotenv
 from serpapi import GoogleSearch
 
@@ -19,23 +24,45 @@ class AIService:
     """
     AI Service for generating personalized emails using Qwen 2.5-7B model
 
-    The model is loaded once on startup and kept in memory for fast generation.
-    Model size: 14GB (requires 16GB GPU VRAM or 32GB RAM for CPU)
+    TWO MODES:
+    - API Mode (USE_HF_API=true): Uses HuggingFace Inference API (easy deployment, costs money)
+    - Local Mode (USE_HF_API=false): Loads model locally (free, but needs 3-5GB download)
     """
 
     def __init__(self):
         self.model = None
         self.tokenizer = None
-        self.model_id = os.getenv("AI_MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
+        self.model_id = os.getenv("AI_MODEL_NAME", "Qwen/Qwen2.5-1.5B-Instruct")
         self.is_loaded = False
 
+        # Check if we should use HuggingFace API instead of local model
+        self.use_api = os.getenv("USE_HF_API", "false").lower() == "true"
+        self.hf_token = os.getenv("HUGGINGFACE_API_KEY")
+
+        if self.use_api:
+            logger.info("🌐 AI Service initialized in API MODE (using HuggingFace Inference API)")
+            if self.hf_token:
+                self.inference_client = InferenceClient(token=self.hf_token)
+                self.is_loaded = True  # API is always "loaded"
+                logger.info("✅ HuggingFace API client ready!")
+            else:
+                logger.error("❌ USE_HF_API=true but HUGGINGFACE_API_KEY not set!")
+                self.is_loaded = False
+        else:
+            logger.info("💻 AI Service initialized in LOCAL MODE (will load model locally)")
+
     def load_model(self):
+        # Skip loading if using API mode
+        if self.use_api:
+            logger.info("⏭️  Skipping model loading (API mode enabled)")
+            return
+
         if self.is_loaded:
             logger.info("AI model already loaded")
             return
 
         try:
-            model_path = os.getenv("AI_MODEL_PATH", self.model_id)  # ← استخدم المسار المحلي إن وُجد
+            model_path = os.getenv("AI_MODEL_PATH", self.model_id)
 
             logger.info(f"Loading AI model from: {model_path}")
 
@@ -70,6 +97,89 @@ class AIService:
             logger.error(f"Failed to load AI model: {e}")
             self.is_loaded = False
             raise Exception(f"AI model loading failed: {str(e)}")
+
+    def _generate_email_with_api(
+        self,
+        lead_name: str,
+        lead_title: str,
+        lead_description: str,
+        template_subject: str,
+        template_body: str,
+        company_info: str,
+        first_name: Optional[str] = None
+    ) -> Dict[str, str]:
+        """
+        Generate email using HuggingFace Inference API (API Mode)
+        """
+        try:
+            greeting = f"Dear {first_name}," if first_name else f"Dear {lead_title} Team,"
+
+            prompt = f"""Generate a professional, personalized cold outreach email.
+
+📌 OUR COMPANY INFO:
+{company_info}
+
+📌 LEAD INFO:
+Company: {lead_title}
+Description: {lead_description or "N/A"}
+
+📌 TEMPLATE TO FOLLOW:
+Subject: {template_subject}
+Body: {template_body}
+
+📌 INSTRUCTIONS:
+- Replace {{{{company_name}}}} with {lead_title}
+- Replace {{{{first_name}}}} with {first_name or lead_title}
+- Use the greeting: {greeting}
+- Make it personalized based on their business description
+- Keep it concise (max 150 words)
+- Be professional but friendly
+- Must feel like it was written specifically for {lead_title}
+
+Return ONLY the email subject and body.
+Format:
+Subject: [generated subject]
+
+[generated email body]"""
+
+            logger.info(f"🌐 Generating email via HuggingFace API for {lead_title}...")
+
+            # Use HuggingFace Inference API
+            response = self.inference_client.text_generation(
+                prompt,
+                model=self.model_id,
+                max_new_tokens=500,
+                temperature=0.7,
+                top_p=0.9
+            )
+
+            # Parse response
+            generated_text = response.strip()
+
+            # Extract subject and body
+            if "Subject:" in generated_text:
+                parts = generated_text.split("\n", 2)
+                subject = parts[0].replace("Subject:", "").strip()
+                body = parts[2].strip() if len(parts) > 2 else parts[1].strip() if len(parts) > 1 else generated_text
+            else:
+                subject = template_subject.replace("{{company_name}}", lead_title)
+                body = generated_text
+
+            logger.info(f"✅ Email generated successfully via API for {lead_title}")
+
+            return {
+                "subject": subject,
+                "body": body
+            }
+
+        except Exception as e:
+            logger.error(f"❌ API generation failed: {e}")
+            # Fallback to template
+            return {
+                "subject": template_subject.replace("{{company_name}}", lead_title),
+                "body": template_body.replace("{{company_name}}", lead_title).replace("{{first_name}}", first_name or lead_title)
+            }
+
     def generate_email(
         self,
         lead_name: str,
@@ -99,6 +209,14 @@ class AIService:
             raise Exception("AI model not loaded. Call load_model() first.")
 
         try:
+            # 🌐 API MODE: Use HuggingFace Inference API
+            if self.use_api:
+                return self._generate_email_with_api(
+                    lead_name, lead_title, lead_description,
+                    template_subject, template_body, company_info, first_name
+                )
+
+            # 💻 LOCAL MODE: Use loaded model
             # Prepare greeting
             greeting = f"Dear {first_name}," if first_name else f"Dear {lead_title} Team,"
 
