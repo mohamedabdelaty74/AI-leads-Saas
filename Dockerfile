@@ -39,5 +39,5 @@ HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Start FastAPI backend (NOT Gradio - that's for local development)
-# Use shell form to properly expand environment variables
-CMD sh -c "uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"
+# Hardcode port 8000 - Railway will map it to $PORT externally
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
